@@ -325,11 +325,11 @@ test('Supertonic TTS: outputSampleRate resamples to 16kHz', { timeout: 1800000 }
   const targetRate = 16000
 
   const model = new ONNXTTS({
-    modelDir,
+    files: { modelDir },
     voiceName: 'F1',
-    outputSampleRate: targetRate,
+    config: { language: 'en', outputSampleRate: targetRate },
     opts: { stats: true }
-  }, { language: 'en' })
+  })
 
   await model.load()
 
@@ -608,10 +608,13 @@ test('Supertonic TTS multilingual (Spanish): basic synthesis with HF Supertone/s
 
 const ENHANCED_SAMPLE_RATE = 48000
 
-function lavasrPaths (lavasrDir) {
+function lavasrEnhancerConfig (lavasrDir, opts = {}) {
   return {
-    enhancerBackbonePath: path.join(lavasrDir, 'enhancer_backbone.onnx'),
-    enhancerSpecHeadPath: path.join(lavasrDir, 'enhancer_spec_head.onnx'),
+    type: 'lavasr',
+    enhance: opts.enhance !== false,
+    denoise: opts.denoise || false,
+    backbonePath: path.join(lavasrDir, 'enhancer_backbone.onnx'),
+    specHeadPath: path.join(lavasrDir, 'enhancer_spec_head.onnx'),
     denoiserPath: path.join(lavasrDir, 'denoiser_core_legacy_fixed63.onnx')
   }
 }
@@ -643,16 +646,18 @@ test('LavaSR: Chatterbox + enhance produces 48kHz output', { timeout: 1800000 },
   const ONNXTTS = require('../..')
 
   const model = new ONNXTTS({
-    tokenizerPath: path.join(chatterboxDir, 'tokenizer.json'),
-    speechEncoderPath: chatterboxPath(chatterboxDir, 'speech_encoder'),
-    embedTokensPath: chatterboxPath(chatterboxDir, 'embed_tokens'),
-    conditionalDecoderPath: chatterboxPath(chatterboxDir, 'conditional_decoder'),
-    languageModelPath: chatterboxLmPath(chatterboxDir),
+    files: {
+      tokenizerPath: path.join(chatterboxDir, 'tokenizer.json'),
+      speechEncoderPath: chatterboxPath(chatterboxDir, 'speech_encoder'),
+      embedTokensPath: chatterboxPath(chatterboxDir, 'embed_tokens'),
+      conditionalDecoderPath: chatterboxPath(chatterboxDir, 'conditional_decoder'),
+      languageModelPath: chatterboxLmPath(chatterboxDir)
+    },
     referenceAudio,
-    enhance: true,
-    ...lavasrPaths(lavasrDir),
+    config: { language: 'en' },
+    enhancer: lavasrEnhancerConfig(lavasrDir),
     opts: { stats: true }
-  }, { language: 'en' })
+  })
 
   await model.load()
 
@@ -689,17 +694,18 @@ test('LavaSR: Chatterbox + denoise + enhance', { timeout: 1800000 }, async (t) =
   const ONNXTTS = require('../..')
 
   const model = new ONNXTTS({
-    tokenizerPath: path.join(chatterboxDir, 'tokenizer.json'),
-    speechEncoderPath: chatterboxPath(chatterboxDir, 'speech_encoder'),
-    embedTokensPath: chatterboxPath(chatterboxDir, 'embed_tokens'),
-    conditionalDecoderPath: chatterboxPath(chatterboxDir, 'conditional_decoder'),
-    languageModelPath: chatterboxLmPath(chatterboxDir),
+    files: {
+      tokenizerPath: path.join(chatterboxDir, 'tokenizer.json'),
+      speechEncoderPath: chatterboxPath(chatterboxDir, 'speech_encoder'),
+      embedTokensPath: chatterboxPath(chatterboxDir, 'embed_tokens'),
+      conditionalDecoderPath: chatterboxPath(chatterboxDir, 'conditional_decoder'),
+      languageModelPath: chatterboxLmPath(chatterboxDir)
+    },
     referenceAudio,
-    enhance: true,
-    denoise: true,
-    ...lavasrPaths(lavasrDir),
+    config: { language: 'en' },
+    enhancer: lavasrEnhancerConfig(lavasrDir, { denoise: true }),
     opts: { stats: true }
-  }, { language: 'en' })
+  })
 
   await model.load()
 
@@ -733,15 +739,17 @@ test('LavaSR: outputSampleRate without enhance (conventional resample)', { timeo
   const targetRate = 16000
 
   const model = new ONNXTTS({
-    tokenizerPath: path.join(chatterboxDir, 'tokenizer.json'),
-    speechEncoderPath: chatterboxPath(chatterboxDir, 'speech_encoder'),
-    embedTokensPath: chatterboxPath(chatterboxDir, 'embed_tokens'),
-    conditionalDecoderPath: chatterboxPath(chatterboxDir, 'conditional_decoder'),
-    languageModelPath: chatterboxLmPath(chatterboxDir),
+    files: {
+      tokenizerPath: path.join(chatterboxDir, 'tokenizer.json'),
+      speechEncoderPath: chatterboxPath(chatterboxDir, 'speech_encoder'),
+      embedTokensPath: chatterboxPath(chatterboxDir, 'embed_tokens'),
+      conditionalDecoderPath: chatterboxPath(chatterboxDir, 'conditional_decoder'),
+      languageModelPath: chatterboxLmPath(chatterboxDir)
+    },
     referenceAudio,
-    outputSampleRate: targetRate,
+    config: { language: 'en', outputSampleRate: targetRate },
     opts: { stats: true }
-  }, { language: 'en' })
+  })
 
   await model.load()
 
@@ -777,17 +785,18 @@ test('LavaSR: enhance + custom outputSampleRate', { timeout: 1800000 }, async (t
   const targetRate = 22050
 
   const model = new ONNXTTS({
-    tokenizerPath: path.join(chatterboxDir, 'tokenizer.json'),
-    speechEncoderPath: chatterboxPath(chatterboxDir, 'speech_encoder'),
-    embedTokensPath: chatterboxPath(chatterboxDir, 'embed_tokens'),
-    conditionalDecoderPath: chatterboxPath(chatterboxDir, 'conditional_decoder'),
-    languageModelPath: chatterboxLmPath(chatterboxDir),
+    files: {
+      tokenizerPath: path.join(chatterboxDir, 'tokenizer.json'),
+      speechEncoderPath: chatterboxPath(chatterboxDir, 'speech_encoder'),
+      embedTokensPath: chatterboxPath(chatterboxDir, 'embed_tokens'),
+      conditionalDecoderPath: chatterboxPath(chatterboxDir, 'conditional_decoder'),
+      languageModelPath: chatterboxLmPath(chatterboxDir)
+    },
     referenceAudio,
-    enhance: true,
-    outputSampleRate: targetRate,
-    ...lavasrPaths(lavasrDir),
+    config: { language: 'en', outputSampleRate: targetRate },
+    enhancer: lavasrEnhancerConfig(lavasrDir),
     opts: { stats: true }
-  }, { language: 'en' })
+  })
 
   await model.load()
 
@@ -821,12 +830,12 @@ test('LavaSR: Supertonic + enhance', { timeout: 1800000 }, async (t) => {
   const ONNXTTS = require('../..')
 
   const model = new ONNXTTS({
-    modelDir: supertonicDir,
+    files: { modelDir: supertonicDir },
     voiceName: 'F1',
-    enhance: true,
-    ...lavasrPaths(lavasrDir),
+    config: { language: 'en' },
+    enhancer: lavasrEnhancerConfig(lavasrDir),
     opts: { stats: true }
-  }, { language: 'en' })
+  })
 
   await model.load()
 
@@ -859,14 +868,17 @@ test('LavaSR: No flags = backward compatible', { timeout: 1800000 }, async (t) =
   const ONNXTTS = require('../..')
 
   const model = new ONNXTTS({
-    tokenizerPath: path.join(chatterboxDir, 'tokenizer.json'),
-    speechEncoderPath: chatterboxPath(chatterboxDir, 'speech_encoder'),
-    embedTokensPath: chatterboxPath(chatterboxDir, 'embed_tokens'),
-    conditionalDecoderPath: chatterboxPath(chatterboxDir, 'conditional_decoder'),
-    languageModelPath: chatterboxLmPath(chatterboxDir),
+    files: {
+      tokenizerPath: path.join(chatterboxDir, 'tokenizer.json'),
+      speechEncoderPath: chatterboxPath(chatterboxDir, 'speech_encoder'),
+      embedTokensPath: chatterboxPath(chatterboxDir, 'embed_tokens'),
+      conditionalDecoderPath: chatterboxPath(chatterboxDir, 'conditional_decoder'),
+      languageModelPath: chatterboxLmPath(chatterboxDir)
+    },
     referenceAudio,
+    config: { language: 'en' },
     opts: { stats: true }
-  }, { language: 'en' })
+  })
 
   await model.load()
 
