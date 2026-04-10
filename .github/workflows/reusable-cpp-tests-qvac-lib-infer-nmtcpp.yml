@@ -18,7 +18,7 @@ env:
 jobs:
   cpp-tests:
     runs-on: ubuntu-24.04
-    environment: release
+    environment: ${{ github.event_name != 'workflow_dispatch' && 'release' || '' }}
     timeout-minutes: 90
     defaults:
       run:

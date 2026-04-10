@@ -66,7 +66,7 @@ jobs:
             arch: x64
 
     runs-on: ${{ matrix.os }}
-    environment: release
+    environment: ${{ github.event_name != 'workflow_dispatch' && 'release' || '' }}
     name: ${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.tags }}
 
     env:
