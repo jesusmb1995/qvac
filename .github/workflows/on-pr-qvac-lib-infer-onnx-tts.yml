@@ -201,6 +201,7 @@ jobs:
       repository: ${{ needs.context.outputs.repository }}
       ref: ${{ needs.context.outputs.ref }}
       workdir: ${{ needs.context.outputs.workdir }}
+      test_type: short
 
   run-mobile-integration-tests:
     permissions:

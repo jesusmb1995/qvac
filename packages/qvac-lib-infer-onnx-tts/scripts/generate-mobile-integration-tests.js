@@ -15,7 +15,7 @@ function getIntegrationFiles () {
   }
 
   return fs.readdirSync(integrationDir)
-    .filter(entry => entry.endsWith('.test.js'))
+    .filter(entry => entry.endsWith('short.test.js'))
     .sort()
 }
 
@@ -61,7 +61,7 @@ function main () {
 
   const content = buildFileContents(files)
   fs.writeFileSync(outputFile, content, 'utf8')
-  console.log(`Generated ${outputFile} with ${files.length} integration runners.`)
+  console.log(`Generated ${outputFile} with ${files.length} integration runner(s).`)
 }
 
 if (require.main === module) {
