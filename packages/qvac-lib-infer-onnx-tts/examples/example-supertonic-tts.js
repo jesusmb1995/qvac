@@ -4,6 +4,7 @@ const path = require('bare-path')
 const ONNXTTS = require('../')
 const { createWav } = require('./wav-helper')
 const { setLogger, releaseLogger } = require('../addonLogging')
+const { ensureSupertonicModels } = require('../test/utils/downloadModel')
 
 const SUPERTONIC_SAMPLE_RATE = 44100
 
@@ -11,6 +12,11 @@ const SUPERTONIC_SAMPLE_RATE = 44100
 const modelDir = path.join(__dirname, '..', 'models', 'supertonic')
 
 async function main () {
+  const downloadResult = await ensureSupertonicModels({ targetDir: modelDir })
+  if (!downloadResult.success) {
+    console.error('Failed to download Supertonic models')
+    return
+  }
   setLogger((priority, message) => {
     const priorityNames = {
       0: 'ERROR',
@@ -35,7 +41,7 @@ async function main () {
     voiceName: 'F1',
     speed: 1.05,
     numInferenceSteps: 5,
-    supertonicMultilingual: true,
+    supertonicMultilingual: false,
     config: {
       language: 'en'
     },
@@ -48,7 +54,27 @@ async function main () {
     await model.load()
     console.log('Model loaded.')
 
-    const textToSynthesize = 'The rolling hills of the willowed valley glimmered brilliantly under the mellowing autumn sun.'
+    const textToSynthesize = `The rolling hills of the willowed valley glimmered brilliantly under the mellowing autumn sun.
+     The sun was setting in the west, casting a golden glow over the landscape.
+     The sky was a canvas of hues, from deep reds to warm oranges and golden yellows.
+     The leaves on the trees were a vibrant red, orange, and yellow.
+     The air was crisp and cool, with a slight chill in the breeze.
+     The sound of the leaves rustling in the wind was a soothing melody.
+     The birds were singing a beautiful song, as if they were happy to be alive.
+     The bees were buzzing around the flowers, collecting nectar.
+     The butterflies were fluttering around the flowers, collecting nectar.
+     The sun was setting in the west, casting a golden glow over the landscape.
+     The sky was a canvas of hues, from deep reds to warm oranges and golden yellows.
+     The leaves on the trees were a vibrant red, orange, and yellow.
+     The air was crisp and cool, with a slight chill in the breeze.
+     The sound of the leaves rustling in the wind was a soothing melody.
+     The birds were singing a beautiful song, as if they were happy to be alive.
+     The bees were buzzing around the flowers, collecting nectar.
+     The butterflies were fluttering around the flowers, collecting nectar.
+     The sun was setting in the west, casting a golden glow over the landscape.
+     The sky was a canvas of hues, from deep reds to warm oranges and golden yellows.
+     The leaves on the trees were a vibrant red, orange, and yellow.`
+
     console.log(`Running TTS on: "${textToSynthesize}"`)
 
     const response = await model.run({
