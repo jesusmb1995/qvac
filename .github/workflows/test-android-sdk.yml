@@ -263,7 +263,7 @@ jobs:
 
           echo "s3-key=${S3_KEY}" >> $GITHUB_OUTPUT
 
-          EXISTING=$(aws s3 ls "s3://${BUCKET}/${S3_KEY}/files/" 2>/dev/null | head -1)
+          EXISTING=$(aws s3 ls "s3://${BUCKET}/${S3_KEY}/files/" 2>/dev/null | head -1 || true)
           if [ -n "$EXISTING" ]; then
             echo "Models already in S3 (key: ${S3_KEY}), skipping upload"
           else
