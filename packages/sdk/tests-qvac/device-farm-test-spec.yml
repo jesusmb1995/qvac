@@ -38,21 +38,22 @@ phases:
               echo "Falling back to normal model download"
               rm -f /tmp/qvac-models.tar.gz
             else
-              echo "Extracting models..."
-              mkdir -p /tmp/qvac-models
-              tar xzf /tmp/qvac-models.tar.gz -C /tmp/qvac-models
+              echo "Pushing tarball to device..."
+              START=$(date +%s)
+              adb push /tmp/qvac-models.tar.gz /data/local/tmp/qvac-models.tar.gz
+              PUSH_TIME=$(( $(date +%s) - START ))
+              echo "Tarball pushed in ${PUSH_TIME}s"
               rm -f /tmp/qvac-models.tar.gz
 
-              echo "Pushing models to device via adb..."
-              adb shell mkdir -p /data/local/tmp/qvac-models
-              START=$(date +%s)
-              adb push /tmp/qvac-models/. /data/local/tmp/qvac-models/
-              PUSH_TIME=$(( $(date +%s) - START ))
-              echo "Models pushed to device in ${PUSH_TIME}s"
-              rm -rf /tmp/qvac-models
+              echo "Extracting on device..."
+              adb shell "mkdir -p /data/local/tmp/qvac-models && tar xzf /data/local/tmp/qvac-models.tar.gz -C /data/local/tmp/qvac-models && rm /data/local/tmp/qvac-models.tar.gz"
 
+              echo "Setting permissions..."
+              adb shell chmod -R 777 /data/local/tmp/qvac-models/
+
+              EXTRACT_TIME=$(( $(date +%s) - START - PUSH_TIME ))
               MODEL_COUNT=$(adb shell ls /data/local/tmp/qvac-models/ | wc -l)
-              echo "Pre-cached ${MODEL_COUNT} model files on device"
+              echo "Pre-cached ${MODEL_COUNT} model files on device (push: ${PUSH_TIME}s, extract+chmod: ${EXTRACT_TIME}s)"
             fi
           fi
         else
