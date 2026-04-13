@@ -41,7 +41,7 @@ on:
         required: false
         type: string
       cache-models:
-        description: "Pre-cache models between runs (S3-backed, app downloads via presigned URLs)"
+        description: "Pre-cache models between runs (S3-backed, host downloads + adb push to device)"
         required: false
         type: boolean
         default: false

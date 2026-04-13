@@ -340,7 +340,14 @@ const MODELS_MANIFEST_PATH =
     ? "file:///data/local/tmp/models-manifest.json"
     : null;
 
-async function downloadModelsFromS3(): Promise<boolean> {
+/**
+ * Copy pre-cached models from /data/local/tmp/qvac-models/ (adb-pushed by
+ * Device Farm test spec) into the app's own cache directory. This bypasses
+ * SELinux restrictions that prevent the app from writing directly to
+ * /data/local/tmp/. On local runs or when cache-models is disabled, the
+ * manifest won't exist and we fall through to normal SDK downloads.
+ */
+async function copyModelsFromCache(): Promise<boolean> {
   if (!MODELS_MANIFEST_PATH) return false;
 
   try {
@@ -351,48 +358,55 @@ async function downloadModelsFromS3(): Promise<boolean> {
       string,
       string
     >;
-    const entries = Object.entries(manifest);
-    if (entries.length === 0) return false;
+    const filenames = Object.keys(manifest);
+    if (filenames.length === 0) return false;
 
-    console.log(`📦 S3 model cache: ${entries.length} files`);
+    console.log(`📦 Pre-cached models: ${filenames.length} files`);
 
     const cacheDir = new Directory(Paths.cache, "qvac-models");
     cacheDir.create();
 
     const start = Date.now();
-    let downloaded = 0;
+    let copied = 0;
     let skipped = 0;
     let failed = 0;
 
-    const BATCH_SIZE = 3;
-    for (let i = 0; i < entries.length; i += BATCH_SIZE) {
-      const batch = entries.slice(i, i + BATCH_SIZE);
-      await Promise.all(
-        batch.map(async ([filename, url]) => {
-          const dest = new File(cacheDir, filename);
-          if (dest.exists) {
-            skipped++;
-            return;
-          }
-          try {
-            await File.downloadFileAsync(url, dest);
-            downloaded++;
-          } catch (err) {
-            failed++;
-            console.log(`📦 Failed: ${filename}: ${err}`);
-          }
-        }),
-      );
-      const done = downloaded + skipped + failed;
-      console.log(
-        `📦 Progress: ${done}/${entries.length} (${downloaded} new, ${skipped} cached, ${failed} failed)`,
-      );
+    for (const filename of filenames) {
+      const dest = new File(cacheDir, filename);
+      if (dest.exists) {
+        skipped++;
+        continue;
+      }
+
+      const src = new File("file:///data/local/tmp/qvac-models/" + filename);
+      if (!src.exists) {
+        failed++;
+        console.log(`📦 Not on device: ${filename}`);
+        continue;
+      }
+
+      try {
+        src.copy(cacheDir);
+        copied++;
+      } catch (err) {
+        failed++;
+        console.log(`📦 Copy failed: ${filename}: ${err}`);
+      }
+
+      const done = copied + skipped + failed;
+      if (done % 4 === 0 || done === filenames.length) {
+        console.log(
+          `📦 Progress: ${done}/${filenames.length} (${copied} copied, ${skipped} cached, ${failed} failed)`,
+        );
+      }
     }
 
     const elapsed = Math.round((Date.now() - start) / 1000);
-    console.log(`📦 S3 cache done in ${elapsed}s`);
+    console.log(
+      `📦 Done in ${elapsed}s (${copied} copied, ${skipped} cached, ${failed} failed)`,
+    );
 
-    if (downloaded + skipped === 0) {
+    if (copied + skipped === 0) {
       console.log("📦 No models available — skipping cache config");
       return false;
     }
@@ -407,15 +421,15 @@ async function downloadModelsFromS3(): Promise<boolean> {
     console.log(`📦 Cache dir: ${cacheDir.uri}`);
     return true;
   } catch (error) {
-    console.log(`📦 S3 cache init failed: ${error}`);
+    console.log(`📦 Cache init failed: ${error}`);
     return false;
   }
 }
 
 export async function bootstrap() {
-  await downloadModelsFromS3();
+  await copyModelsFromCache();
   await resources.downloadAllOnce(console.log);
-};
+}
 
 export const executor = createExecutor({
   handlers: [
