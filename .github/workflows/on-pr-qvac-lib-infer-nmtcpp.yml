@@ -43,6 +43,24 @@ jobs:
         with:
           github-token: ${{ github.token }}
 
+  ensure-npm-public:
+    name: Ensure NPM package is public
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # 6.3.0
+        with:
+          node-version: 18
+          registry-url: https://registry.npmjs.org/
+      - name: Set package access to public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm access set status=public @qvac/translation-nmtcpp
+          npm access set status=public @qvac/langdetect-text-cld2
+
   changes:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
