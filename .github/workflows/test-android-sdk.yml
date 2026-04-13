@@ -378,10 +378,7 @@ jobs:
         run: |
           S3_KEY="${{ needs.build.outputs.s3-models-key }}"
           BUCKET="${{ secrets.MODEL_S3_BUCKET }}"
-          BUCKET_REGION=$(aws s3api get-bucket-location --bucket "${BUCKET}" --query "LocationConstraint" --output text)
-          if [ "$BUCKET_REGION" = "None" ] || [ "$BUCKET_REGION" = "null" ]; then
-            BUCKET_REGION="us-east-1"
-          fi
+          BUCKET_REGION=$(curl -sI "https://${BUCKET}.s3.amazonaws.com/" | grep -i 'x-amz-bucket-region' | awk '{print $2}' | tr -d '\r\n')
           echo "Bucket region: ${BUCKET_REGION}"
           URL=$(aws s3 presign "s3://${BUCKET}/${S3_KEY}/models.tar.gz" --expires-in 21600 --region "${BUCKET_REGION}")
           echo "Pre-signed URL generated (valid 6h)"
