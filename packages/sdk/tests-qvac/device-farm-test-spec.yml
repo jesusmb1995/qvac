@@ -4,60 +4,19 @@ android_test_host: amazon_linux_2
 phases:
   pre_test:
     commands:
-      # Download and push pre-cached models if URL file exists in test package
+      # Push models manifest to device if present in test package.
+      # The app reads this manifest at bootstrap and downloads models
+      # directly from S3 over WiFi — no adb push of large files needed.
       - |-
-        MODELS_URL_FILE="$DEVICEFARM_TEST_PACKAGE_PATH/models-url.txt"
-        if [ -f "$MODELS_URL_FILE" ]; then
-          echo "Pre-cached models detected, downloading from S3..."
-          MODELS_URL=$(cat "$MODELS_URL_FILE")
-          URL_LEN=${#MODELS_URL}
-          echo "URL length: ${URL_LEN} chars"
-
-          if [ "$URL_LEN" -lt 50 ]; then
-            echo "ERROR: URL seems too short (${URL_LEN} chars), skipping cache"
-            echo "Falling back to normal model download"
-          else
-            START=$(date +%s)
-            HTTP_CODE=$(curl -fSL -o /tmp/qvac-models.tar.gz -w '%{http_code}' "$MODELS_URL" 2>/tmp/curl-error.log) || true
-            DL_TIME=$(( $(date +%s) - START ))
-            DL_SIZE=$(du -h /tmp/qvac-models.tar.gz 2>/dev/null | cut -f1)
-            echo "curl finished: HTTP ${HTTP_CODE}, ${DL_SIZE} in ${DL_TIME}s"
-
-            if [ -f /tmp/curl-error.log ] && [ -s /tmp/curl-error.log ]; then
-              echo "curl stderr:"
-              cat /tmp/curl-error.log
-            fi
-
-            DL_BYTES=$(stat -c%s /tmp/qvac-models.tar.gz 2>/dev/null || echo 0)
-            MIN_SIZE=$((100 * 1024 * 1024))
-            if [ "$DL_BYTES" -lt "$MIN_SIZE" ]; then
-              echo "ERROR: Downloaded file too small (${DL_BYTES} bytes, expected >100MB)"
-              echo "File content (first 500 bytes):"
-              head -c 500 /tmp/qvac-models.tar.gz || true
-              echo ""
-              echo "Falling back to normal model download"
-              rm -f /tmp/qvac-models.tar.gz
-            else
-              echo "Pushing tarball to device..."
-              START=$(date +%s)
-              adb push /tmp/qvac-models.tar.gz /data/local/tmp/qvac-models.tar.gz
-              PUSH_TIME=$(( $(date +%s) - START ))
-              echo "Tarball pushed in ${PUSH_TIME}s"
-              rm -f /tmp/qvac-models.tar.gz
-
-              echo "Extracting on device..."
-              adb shell "mkdir -p /data/local/tmp/qvac-models && tar xzf /data/local/tmp/qvac-models.tar.gz -C /data/local/tmp/qvac-models && rm /data/local/tmp/qvac-models.tar.gz"
-
-              echo "Setting permissions..."
-              adb shell chmod -R 777 /data/local/tmp/qvac-models/
-
-              EXTRACT_TIME=$(( $(date +%s) - START - PUSH_TIME ))
-              MODEL_COUNT=$(adb shell ls /data/local/tmp/qvac-models/ | wc -l)
-              echo "Pre-cached ${MODEL_COUNT} model files on device (push: ${PUSH_TIME}s, extract+chmod: ${EXTRACT_TIME}s)"
-            fi
-          fi
+        MANIFEST="$DEVICEFARM_TEST_PACKAGE_PATH/models-manifest.json"
+        if [ -f "$MANIFEST" ]; then
+          MANIFEST_SIZE=$(wc -c < "$MANIFEST")
+          FILE_COUNT=$(python3 -c "import json; print(len(json.load(open('$MANIFEST'))))" 2>/dev/null || echo "?")
+          echo "Models manifest found: ${FILE_COUNT} files (${MANIFEST_SIZE} bytes)"
+          adb push "$MANIFEST" /data/local/tmp/models-manifest.json
+          echo "Manifest pushed to device — app will download from S3 at bootstrap"
         else
-          echo "No pre-cached models (cache-models not enabled)"
+          echo "No models manifest (cache-models not enabled)"
         fi
 
       # Install and launch the app

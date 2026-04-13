@@ -41,7 +41,7 @@ on:
         required: false
         type: string
       cache-models:
-        description: "Pre-cache models between runs (S3-backed, pushed to device via adb)"
+        description: "Pre-cache models between runs (S3-backed, app downloads via presigned URLs)"
         required: false
         type: boolean
         default: false
@@ -259,21 +259,19 @@ jobs:
           MODELS_HASH=$(sha256sum packages/sdk/models/registry/models.ts | cut -c1-16)
           S3_KEY="qvac-models/mobile-${MODELS_HASH}"
           BUCKET="${{ secrets.MODEL_S3_BUCKET }}"
+          CACHE_DIR="${{ inputs.working-directory }}/.qvac-cache"
 
           echo "s3-key=${S3_KEY}" >> $GITHUB_OUTPUT
 
-          if aws s3 ls "s3://${BUCKET}/${S3_KEY}/models.tar.gz" 2>/dev/null; then
+          EXISTING=$(aws s3 ls "s3://${BUCKET}/${S3_KEY}/files/" 2>/dev/null | head -1)
+          if [ -n "$EXISTING" ]; then
             echo "Models already in S3 (key: ${S3_KEY}), skipping upload"
           else
-            echo "Packaging models for S3 upload..."
-            tar czf /tmp/qvac-models.tar.gz -C "${{ inputs.working-directory }}/.qvac-cache" .
-            TARBALL_SIZE=$(du -h /tmp/qvac-models.tar.gz | cut -f1)
-            echo "Tarball size: ${TARBALL_SIZE}"
-
-            echo "Uploading to s3://${BUCKET}/${S3_KEY}/models.tar.gz..."
-            aws s3 cp /tmp/qvac-models.tar.gz "s3://${BUCKET}/${S3_KEY}/models.tar.gz"
+            FILE_COUNT=$(ls -1 "$CACHE_DIR" | wc -l)
+            TOTAL_SIZE=$(du -sh "$CACHE_DIR" | cut -f1)
+            echo "Uploading ${FILE_COUNT} model files (${TOTAL_SIZE}) to s3://${BUCKET}/${S3_KEY}/files/..."
+            aws s3 sync "$CACHE_DIR" "s3://${BUCKET}/${S3_KEY}/files/" --size-only
             echo "S3 upload complete"
-            rm -f /tmp/qvac-models.tar.gz
           fi
 
       # --- End model pre-caching ---
@@ -372,17 +370,30 @@ jobs:
             sleep 10
           done
 
-      - name: Generate models cache pre-signed URL
-        id: models-url
+      - name: Generate models cache manifest
+        id: models-manifest
         if: needs.build.outputs.cache-models == 'true'
         run: |
           S3_KEY="${{ needs.build.outputs.s3-models-key }}"
           BUCKET="${{ secrets.MODEL_S3_BUCKET }}"
           BUCKET_REGION=$(curl -sI "https://${BUCKET}.s3.amazonaws.com/" | grep -i 'x-amz-bucket-region' | awk '{print $2}' | tr -d '\r\n')
           echo "Bucket region: ${BUCKET_REGION}"
-          URL=$(aws s3 presign "s3://${BUCKET}/${S3_KEY}/models.tar.gz" --expires-in 21600 --region "${BUCKET_REGION}")
-          echo "Pre-signed URL generated (valid 6h)"
-          echo "url=${URL}" >> $GITHUB_OUTPUT
+
+          MANIFEST="{}"
+          FILE_COUNT=0
+          while IFS= read -r line; do
+            KEY=$(echo "$line" | awk '{print $4}')
+            [ -z "$KEY" ] && continue
+            BASENAME=$(basename "$KEY")
+            URL=$(aws s3 presign "s3://${BUCKET}/${KEY}" --expires-in 21600 --region "${BUCKET_REGION}")
+            MANIFEST=$(echo "$MANIFEST" | jq --arg key "$BASENAME" --arg url "$URL" '. + {($key): $url}')
+            FILE_COUNT=$((FILE_COUNT + 1))
+          done <<< "$(aws s3 ls "s3://${BUCKET}/${S3_KEY}/files/" --recursive --region "${BUCKET_REGION}")"
+
+          echo "$MANIFEST" | jq . > /tmp/models-manifest.json
+          MANIFEST_SIZE=$(wc -c < /tmp/models-manifest.json)
+          echo "Manifest: ${FILE_COUNT} files, ${MANIFEST_SIZE} bytes"
+          echo "has-manifest=true" >> $GITHUB_OUTPUT
 
       - name: Create and upload dummy test package
         id: upload-test-pkg
@@ -391,10 +402,9 @@ jobs:
           echo '{"name":"qvac-test-stub","version":"1.0.0"}' > /tmp/dummy-test-pkg/package.json
           cp "${{ inputs.working-directory }}/device-farm-gen-junit.py" /tmp/dummy-test-pkg/
 
-          # Include models cache URL if caching is enabled
-          if [ -n "${{ steps.models-url.outputs.url }}" ]; then
-            printf '%s' '${{ steps.models-url.outputs.url }}' > /tmp/dummy-test-pkg/models-url.txt
-            echo "models-url.txt included in test package ($(wc -c < /tmp/dummy-test-pkg/models-url.txt) bytes)"
+          if [ -f "/tmp/models-manifest.json" ]; then
+            cp /tmp/models-manifest.json /tmp/dummy-test-pkg/
+            echo "models-manifest.json included in test package"
           fi
 
           (cd /tmp/dummy-test-pkg && zip -r /tmp/dummy-test-pkg.zip .)

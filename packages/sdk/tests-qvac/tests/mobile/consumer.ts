@@ -1,4 +1,5 @@
 import { Platform } from "react-native";
+import { File, Directory, Paths } from "expo-file-system";
 import { createExecutor, SkipExecutor } from "@tetherto/qvac-test-suite/mobile";
 import {
   profiler,
@@ -334,7 +335,85 @@ function skipTests(testIds: string[], reason: string) {
   return new SkipExecutor(new RegExp(`^(${testIds.join("|")})$`), reason);
 }
 
+const MODELS_MANIFEST_PATH =
+  Platform.OS === "android"
+    ? "file:///data/local/tmp/models-manifest.json"
+    : null;
+
+async function downloadModelsFromS3(): Promise<boolean> {
+  if (!MODELS_MANIFEST_PATH) return false;
+
+  try {
+    const manifestFile = new File(MODELS_MANIFEST_PATH);
+    if (!manifestFile.exists) return false;
+
+    const manifest = JSON.parse(await manifestFile.text()) as Record<
+      string,
+      string
+    >;
+    const entries = Object.entries(manifest);
+    if (entries.length === 0) return false;
+
+    console.log(`📦 S3 model cache: ${entries.length} files`);
+
+    const cacheDir = new Directory(Paths.cache, "qvac-models");
+    cacheDir.create();
+
+    const start = Date.now();
+    let downloaded = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    const BATCH_SIZE = 3;
+    for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+      const batch = entries.slice(i, i + BATCH_SIZE);
+      await Promise.all(
+        batch.map(async ([filename, url]) => {
+          const dest = new File(cacheDir, filename);
+          if (dest.exists) {
+            skipped++;
+            return;
+          }
+          try {
+            await File.downloadFileAsync(url, dest);
+            downloaded++;
+          } catch (err) {
+            failed++;
+            console.log(`📦 Failed: ${filename}: ${err}`);
+          }
+        }),
+      );
+      const done = downloaded + skipped + failed;
+      console.log(
+        `📦 Progress: ${done}/${entries.length} (${downloaded} new, ${skipped} cached, ${failed} failed)`,
+      );
+    }
+
+    const elapsed = Math.round((Date.now() - start) / 1000);
+    console.log(`📦 S3 cache done in ${elapsed}s`);
+
+    if (downloaded + skipped === 0) {
+      console.log("📦 No models available — skipping cache config");
+      return false;
+    }
+
+    const configFile = new File(Paths.document, "qvac.config.json");
+    configFile.create({ overwrite: true });
+    configFile.write(
+      JSON.stringify({
+        cacheDirectory: cacheDir.uri.replace("file://", ""),
+      }),
+    );
+    console.log(`📦 Cache dir: ${cacheDir.uri}`);
+    return true;
+  } catch (error) {
+    console.log(`📦 S3 cache init failed: ${error}`);
+    return false;
+  }
+}
+
 export async function bootstrap() {
+  await downloadModelsFromS3();
   await resources.downloadAllOnce(console.log);
 };
 
