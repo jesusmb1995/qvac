@@ -10,27 +10,51 @@ phases:
         if [ -f "$MODELS_URL_FILE" ]; then
           echo "Pre-cached models detected, downloading from S3..."
           MODELS_URL=$(cat "$MODELS_URL_FILE")
-          START=$(date +%s)
-          curl -fsSL -o /tmp/qvac-models.tar.gz "$MODELS_URL"
-          DL_TIME=$(( $(date +%s) - START ))
-          DL_SIZE=$(du -h /tmp/qvac-models.tar.gz | cut -f1)
-          echo "Downloaded ${DL_SIZE} in ${DL_TIME}s"
+          URL_LEN=${#MODELS_URL}
+          echo "URL length: ${URL_LEN} chars"
 
-          echo "Extracting models..."
-          mkdir -p /tmp/qvac-models
-          tar xzf /tmp/qvac-models.tar.gz -C /tmp/qvac-models
-          rm -f /tmp/qvac-models.tar.gz
+          if [ "$URL_LEN" -lt 50 ]; then
+            echo "ERROR: URL seems too short (${URL_LEN} chars), skipping cache"
+            echo "Falling back to normal model download"
+          else
+            START=$(date +%s)
+            HTTP_CODE=$(curl -fSL -o /tmp/qvac-models.tar.gz -w '%{http_code}' "$MODELS_URL" 2>/tmp/curl-error.log) || true
+            DL_TIME=$(( $(date +%s) - START ))
+            DL_SIZE=$(du -h /tmp/qvac-models.tar.gz 2>/dev/null | cut -f1)
+            echo "curl finished: HTTP ${HTTP_CODE}, ${DL_SIZE} in ${DL_TIME}s"
 
-          echo "Pushing models to device via adb..."
-          adb shell mkdir -p /data/local/tmp/qvac-models
-          START=$(date +%s)
-          adb push /tmp/qvac-models/. /data/local/tmp/qvac-models/
-          PUSH_TIME=$(( $(date +%s) - START ))
-          echo "Models pushed to device in ${PUSH_TIME}s"
-          rm -rf /tmp/qvac-models
+            if [ -f /tmp/curl-error.log ] && [ -s /tmp/curl-error.log ]; then
+              echo "curl stderr:"
+              cat /tmp/curl-error.log
+            fi
 
-          MODEL_COUNT=$(adb shell ls /data/local/tmp/qvac-models/ | wc -l)
-          echo "Pre-cached ${MODEL_COUNT} model files on device"
+            DL_BYTES=$(stat -c%s /tmp/qvac-models.tar.gz 2>/dev/null || echo 0)
+            MIN_SIZE=$((100 * 1024 * 1024))
+            if [ "$DL_BYTES" -lt "$MIN_SIZE" ]; then
+              echo "ERROR: Downloaded file too small (${DL_BYTES} bytes, expected >100MB)"
+              echo "File content (first 500 bytes):"
+              head -c 500 /tmp/qvac-models.tar.gz || true
+              echo ""
+              echo "Falling back to normal model download"
+              rm -f /tmp/qvac-models.tar.gz
+            else
+              echo "Extracting models..."
+              mkdir -p /tmp/qvac-models
+              tar xzf /tmp/qvac-models.tar.gz -C /tmp/qvac-models
+              rm -f /tmp/qvac-models.tar.gz
+
+              echo "Pushing models to device via adb..."
+              adb shell mkdir -p /data/local/tmp/qvac-models
+              START=$(date +%s)
+              adb push /tmp/qvac-models/. /data/local/tmp/qvac-models/
+              PUSH_TIME=$(( $(date +%s) - START ))
+              echo "Models pushed to device in ${PUSH_TIME}s"
+              rm -rf /tmp/qvac-models
+
+              MODEL_COUNT=$(adb shell ls /data/local/tmp/qvac-models/ | wc -l)
+              echo "Pre-cached ${MODEL_COUNT} model files on device"
+            fi
+          fi
         else
           echo "No pre-cached models (cache-models not enabled)"
         fi

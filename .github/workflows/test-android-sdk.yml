@@ -391,8 +391,8 @@ jobs:
 
           # Include models cache URL if caching is enabled
           if [ -n "${{ steps.models-url.outputs.url }}" ]; then
-            echo "${{ steps.models-url.outputs.url }}" > /tmp/dummy-test-pkg/models-url.txt
-            echo "models-url.txt included in test package"
+            printf '%s' '${{ steps.models-url.outputs.url }}' > /tmp/dummy-test-pkg/models-url.txt
+            echo "models-url.txt included in test package ($(wc -c < /tmp/dummy-test-pkg/models-url.txt) bytes)"
           fi
 
           (cd /tmp/dummy-test-pkg && zip -r /tmp/dummy-test-pkg.zip .)
