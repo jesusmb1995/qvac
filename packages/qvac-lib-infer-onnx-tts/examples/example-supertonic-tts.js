@@ -4,7 +4,6 @@ const path = require('bare-path')
 const ONNXTTS = require('../')
 const { createWav } = require('./wav-helper')
 const { setLogger, releaseLogger } = require('../addonLogging')
-const { ensureSupertonicModels } = require('../test/utils/downloadModel')
 
 const SUPERTONIC_SAMPLE_RATE = 44100
 
@@ -12,11 +11,6 @@ const SUPERTONIC_SAMPLE_RATE = 44100
 const modelDir = path.join(__dirname, '..', 'models', 'supertonic')
 
 async function main () {
-  const downloadResult = await ensureSupertonicModels({ targetDir: modelDir })
-  if (!downloadResult.success) {
-    console.error('Failed to download Supertonic models')
-    return
-  }
   setLogger((priority, message) => {
     const priorityNames = {
       0: 'ERROR',
