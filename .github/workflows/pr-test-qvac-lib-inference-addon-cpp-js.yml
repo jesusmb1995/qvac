@@ -1,0 +1,160 @@
+name: JS Test pipeline for PRs (Inference-addon-cpp)
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      checkout_repository:
+        description: Repository to checkout for the tested source.
+        required: true
+        type: string
+      checkout_ref:
+        description: Branch or ref to checkout for the tested source.
+        required: true
+        type: string
+
+env:
+  PKG_DIR: packages/qvac-lib-inference-addon-cpp
+  VCPKG_CACHE_DIR: ${{ github.workspace }}/packages/qvac-lib-inference-addon-cpp/vcpkg/cache
+  VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/packages/qvac-lib-inference-addon-cpp/vcpkg/cache,readwrite"
+
+jobs:
+  run-js-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux-x64
+            asan: false
+          - os: ubuntu-22.04
+            name: linux-x64-asan
+            asan: true
+          - os: macos-14
+            name: darwin-arm64
+            asan: false
+          - os: windows-2022
+            name: win32-x64
+            asan: false
+    runs-on: ${{ matrix.os }}
+    environment: release
+    name: js-${{ matrix.name }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout tested source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
+        with:
+          repository: ${{ inputs.checkout_repository }}
+          ref: ${{ inputs.checkout_ref }}
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: yamlfmt
+        uses: ./.github/actions/yamlfmt
+        with:
+          workdir: ${{ env.PKG_DIR }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # 4.4.0
+        with:
+          node-version: 22
+
+      - if: ${{ matrix.os == 'windows-2022' }}
+        name: Enable git long paths
+        run: git config --system core.longpaths true
+
+      - if: ${{ matrix.os == 'windows-2022' }}
+        name: Setup CMake on Windows
+        run: |
+          cd ..
+          curl -L https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-windows-x86_64.zip -o cmake-3.31.6-windows-x86_64.zip
+          unzip cmake-3.31.6-windows-x86_64.zip
+          echo "$PWD/cmake-3.31.6-windows-x86_64/bin" >> "$GITHUB_PATH"
+
+      - if: ${{ matrix.os == 'macos-14' }}
+        name: Setup CMake on macOS
+        run: |
+          cd ..
+          curl -L https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-macos-universal.tar.gz -o cmake-3.31.6-macos-universal.tar.gz
+          tar -xzf cmake-3.31.6-macos-universal.tar.gz
+          echo "$PWD/cmake-3.31.6-macos-universal/bin" >> "$GITHUB_PATH"
+
+      - name: Configure git
+        run: |
+          git config --global --add url."https://${{ secrets.PAT_TOKEN }}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+          git config --global --add url."https://${{ secrets.PAT_TOKEN }}:x-oauth-basic@github.com/".insteadOf "git@github.com:"
+
+      - if: ${{ matrix.os == 'macos-14' }}
+        name: Install vcpkg on macOS
+        run: |
+          cd ..
+          git clone https://github.com/microsoft/vcpkg.git
+          cd vcpkg
+          ./bootstrap-vcpkg.sh -disableMetrics
+          echo "VCPKG_ROOT=$PWD" >> "$GITHUB_ENV"
+          echo "$PWD" >> "$GITHUB_PATH"
+
+      - if: ${{ matrix.os == 'ubuntu-22.04' }}
+        name: Configure vcpkg on Linux
+        run: echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+
+      - if: ${{ matrix.os == 'windows-2022' }}
+        name: Configure vcpkg and CMake generator on Windows
+        run: |
+          echo "VCPKG_ROOT=${VCPKG_INSTALLATION_ROOT//\\//}" >> "$GITHUB_ENV"
+          echo "CMAKE_GENERATOR=Visual Studio 17 2022" >> "$GITHUB_ENV"
+          echo "CMAKE_GENERATOR_PLATFORM=x64" >> "$GITHUB_ENV"
+
+      - name: Create vcpkg cache location
+        run: mkdir -p "${{ env.PKG_DIR }}/vcpkg/cache"
+
+      - name: Get vcpkg cache
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # 5.0.4
+        with:
+          key: js-${{ matrix.name }}-${{ hashFiles('packages/qvac-lib-inference-addon-cpp/tests/integration_js/**/vcpkg.json', 'packages/qvac-lib-inference-addon-cpp/tests/integration_js/**/vcpkg-configuration.json') }}
+          path: ${{ env.PKG_DIR }}/vcpkg/cache
+
+      - if: ${{ !matrix.asan }}
+        name: Run JS integration packages
+        run: |
+          for package_dir in "${{ env.PKG_DIR }}"/tests/integration_js/*; do
+            if [ ! -f "$package_dir/package.json" ]; then
+              continue
+            fi
+            echo "::group::$(basename "$package_dir")"
+            (
+              cd "$package_dir"
+              npm install --package-lock=false
+              npm exec -- standard
+              npm run build
+              npm test
+            )
+            echo "::endgroup::"
+          done
+
+      - if: ${{ matrix.asan }}
+        name: Run JS integration packages with ASAN
+        run: |
+          for package_dir in "${{ env.PKG_DIR }}"/tests/integration_js/*; do
+            if [ ! -f "$package_dir/package.json" ]; then
+              continue
+            fi
+            echo "::group::$(basename "$package_dir") ASAN"
+            (
+              cd "$package_dir"
+              npm install --package-lock=false
+              npm exec -- standard
+              rm -rf build prebuilds
+              CXXFLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+              LDFLAGS="-fsanitize=address" \
+              npm run build
+              LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.8 \
+              ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:alloc_dealloc_mismatch=0 \
+              npm test
+            )
+            echo "::endgroup::"
+          done
