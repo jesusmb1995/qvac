@@ -26,10 +26,15 @@ export type AddonRunJobMessage = AddonMessage | AddonMediaMessage
 export interface Addon {
   loadWeights(data: { filename: string; chunk: Uint8Array | null; completed: boolean }, logger?: QvacLogger): Promise<void>
   activate(): Promise<void>
-  runJob(data: AddonRunJobMessage[]): Promise<boolean>
+  runJob(data: AddonRunJobMessage[] | AddonBatchRunItem[]): Promise<boolean>
   cancel(): Promise<void>
   finetune?(params: FinetuneOptions): Promise<boolean>
   unload(): Promise<void>
+}
+
+export interface AddonBatchRunItem {
+  id: string
+  messages: AddonRunJobMessage[]
 }
 
 export interface LlamaConfig {
@@ -150,14 +155,44 @@ export interface RunOptions {
   saveCacheToDisk?: boolean
 }
 
+export interface BatchPrompt {
+  id?: string
+  prompt: Message[]
+  runOptions?: RunOptions
+}
+
+export interface BatchOutputChunk {
+  id: string
+  chunk: string
+}
+
+export interface BatchResult {
+  id: string
+  output: string
+}
+
+export interface BatchResponse extends QvacResponse {
+  ids: string[]
+  on(event: 'output', cb: (chunk: BatchOutputChunk) => void): this
+  onUpdate(cb: (chunk: BatchOutputChunk) => void): this
+  await(): Promise<BatchResult[]>
+}
+
 export interface RuntimeStats {
   TTFT: number
   TPS: number
   ppTPS: number
+  /** Final cache tokens for single requests, or the sum across completed batch slots. */
   CacheTokens: number
   generatedTokens: number
   promptTokens: number
+  /** Context-window slides for single requests, or the sum across completed batch slots. */
   contextSlides: number
+  /**
+   * Average active sequences decoded together during the last request,
+   * including overlapping requests from other callers.
+   */
+  avgConcurrentSeq: number
   backendDevice: 'cpu' | 'gpu'
 }
 
@@ -283,6 +318,7 @@ export default class LlmLlamacpp {
 
   load(): Promise<void>
   run(prompt: Message[], runOptions?: RunOptions): Promise<QvacResponse>
+  run(prompt: Message[][] | BatchPrompt[]): Promise<BatchResponse>
   finetune(finetuningOptions: FinetuneOptions): Promise<FinetuneHandle>
   cancel(): Promise<void>
   pause(): Promise<void>
