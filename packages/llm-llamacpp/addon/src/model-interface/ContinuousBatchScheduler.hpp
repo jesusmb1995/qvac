@@ -4,7 +4,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -15,6 +14,7 @@
 #include <vector>
 
 #include <common/sampling.h>
+#include <concurrentqueue/concurrentqueue.h>
 #include <llama.h>
 
 #include "LlmContext.hpp"
@@ -234,7 +234,7 @@ private:
   std::atomic<bool> cancelRequested_ = false;
   mutable std::mutex mutex_;
   std::condition_variable workCv_;
-  std::deque<QueuedRequest> pending_;
+  moodycamel::ConcurrentQueue<QueuedRequest> pending_;
   std::thread worker_;
   bool workerStarted_ = false;
   bool stopping_ = false;

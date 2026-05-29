@@ -1,6 +1,5 @@
 #include "ContinuousBatchScheduler.hpp"
 
-#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <optional>
@@ -95,12 +94,12 @@ ContinuousBatchScheduler::processBatch(std::vector<SubmitRequest>&& requests) {
   }
 
   std::unique_lock lock(mutex_);
-  if (pending_.empty() && !hasWorkLocked()) {
+  if (pending_.size_approx() == 0 && !hasWorkLocked()) {
     stats_.reset();
   }
   ensureWorkerStartedLocked();
   for (size_t i = 0; i < requests.size(); i++) {
-    pending_.push_back(QueuedRequest{
+    pending_.enqueue(QueuedRequest{
         .request = std::move(requests[i]), .group = group, .outputIndex = i});
   }
   workCv_.notify_all();
@@ -128,8 +127,8 @@ void ContinuousBatchScheduler::workerLoop() {
   std::unique_lock lock(mutex_);
   while (true) {
     workCv_.wait(lock, [this] {
-      return stopping_ || cancelRequested_.load() || !pending_.empty() ||
-             hasWorkLocked();
+      return stopping_ || cancelRequested_.load() ||
+             pending_.size_approx() > 0 || hasWorkLocked();
     });
     if (stopping_) {
       break;
@@ -148,25 +147,17 @@ void ContinuousBatchScheduler::workerLoop() {
       (void)stepOk;
     } catch (...) {
       const std::exception_ptr error = std::current_exception();
-      std::vector<std::shared_ptr<BatchGroup>> activeGroups;
       for (const auto& slot : slots_) {
         if (slot.has_value() && slot->group) {
-          activeGroups.push_back(slot->group);
+          failGroupLocked(slot->group, error);
         }
       }
-      for (const auto& group : activeGroups) {
-        failGroupLocked(group, error);
-      }
-      std::vector<std::shared_ptr<BatchGroup>> pendingGroups;
-      for (const auto& queued : pending_) {
+      QueuedRequest queued;
+      while (pending_.try_dequeue(queued)) {
         if (queued.group) {
-          pendingGroups.push_back(queued.group);
+          failGroupLocked(queued.group, error);
         }
       }
-      for (const auto& group : pendingGroups) {
-        failGroupLocked(group, error);
-      }
-      pending_.clear();
       clearLocked();
       cancelRequested_.store(false);
     }
@@ -177,10 +168,11 @@ void ContinuousBatchScheduler::workerLoop() {
 }
 
 void ContinuousBatchScheduler::admitPendingIntoFreeSlotsLocked() {
-  while (!pending_.empty() && batcher_.firstFreeSeqId().has_value()) {
-    QueuedRequest queued = std::move(pending_.front());
+  QueuedRequest queued;
+  while (batcher_.firstFreeSeqId().has_value() &&
+         pending_.try_dequeue(queued)) {
     const std::shared_ptr<BatchGroup> group = queued.group;
-    pending_.pop_front();
+    // already-failed/cancelled also skipped as group is `done`
     if (group && group->done) {
       continue;
     }
@@ -591,14 +583,6 @@ void ContinuousBatchScheduler::failGroupLocked(
   group->error = error;
   group->stats = stats_;
   group->done = true;
-  pending_.erase(
-      std::remove_if(
-          pending_.begin(),
-          pending_.end(),
-          [&group](const QueuedRequest& queued) {
-            return queued.group == group;
-          }),
-      pending_.end());
 
   auto kvClear = [this](uint32_t seqId) {
     auto* mem = llama_get_memory(shared_.lctx);
@@ -624,9 +608,8 @@ void ContinuousBatchScheduler::failGroupLocked(
 }
 
 void ContinuousBatchScheduler::cancelPendingLocked() {
-  while (!pending_.empty()) {
-    QueuedRequest queued = std::move(pending_.front());
-    pending_.pop_front();
+  QueuedRequest queued;
+  while (pending_.try_dequeue(queued)) {
     completeGroupRequestLocked(queued.group);
   }
 }
