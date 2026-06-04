@@ -98,7 +98,7 @@ async function runQuantizedKvcacheTest (options = {}) { // eslint-disable-line n
 
 async function runQwen35SlidingContextTest (options = {}) { // eslint-disable-line no-unused-vars
   if (typeof __shouldRunTest === 'function' && !__shouldRunTest('runQwen35SlidingContextTest')) return __FILTERED
-  return runIntegrationModule('../integration/qwen3-5-sliding-context.test.js', options)
+  return runIntegrationModule('../integration/mrope-sliding-context.test.js', options)
 }
 
 async function runQwen35Test (options = {}) { // eslint-disable-line no-unused-vars
