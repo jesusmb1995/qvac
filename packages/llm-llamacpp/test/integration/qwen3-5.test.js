@@ -4,7 +4,7 @@ const test = require('brittle')
 const fs = require('bare-fs')
 const path = require('bare-path')
 const LlmLlamacpp = require('../../index.js')
-const { ensureModel, getMediaPath } = require('./utils')
+const { cleanupIntegrationCacheFiles, ensureModel, getMediaPath } = require('./utils')
 const os = require('bare-os')
 
 const platform = os.platform()
@@ -168,6 +168,7 @@ test('Qwen3.5-0.8B supports multi-turn conversation with KV cache', {
     await addon.load()
 
     const sessionName = path.join(dirPath, 'qwen3-5-multiturn-cache.bin')
+    cleanupIntegrationCacheFiles(sessionName)
     const systemMsg = { role: 'system', content: 'You are a helpful assistant. Answer concisely with just the city name.' }
     const userTurn1 = { role: 'user', content: 'What is the capital of France?' }
 
