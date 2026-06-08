@@ -19,14 +19,13 @@ struct ParsedPromptPayload {
 
 class CacheManager {
 public:
-  CacheManager(
-      LlmContext* llmContext, llama_pos configuredNDiscarded,
-      std::function<void(bool)> resetStateCallback);
+  CacheManager(LlmContext *llmContext, llama_pos configuredNDiscarded,
+               std::function<void(bool)> resetStateCallback);
 
   bool handleCache(
-      ParsedPromptPayload& parsedPrompt, const std::string& inputPrompt,
-      std::function<ParsedPromptPayload(const std::string&)> formatPrompt,
-      const std::string& cacheKey = "");
+      ParsedPromptPayload &parsedPrompt, const std::string &inputPrompt,
+      std::function<ParsedPromptPayload(const std::string &)> formatPrompt,
+      const std::string &cacheKey = "");
 
   bool loadCache();
   void saveCache();
@@ -36,11 +35,11 @@ public:
   bool wasCacheUsedInLastPrompt() const;
 
 private:
-  void writeCacheFile(const std::string& path);
-  static void atomicPromoteFile(const std::string& from, const std::string& to);
-  static bool isFileInitialized(const std::filesystem::path& path);
+  void writeCacheFile(const std::string &path);
+  static void atomicPromoteFile(const std::string &from, const std::string &to);
+  static bool isFileInitialized(const std::filesystem::path &path);
 
-  LlmContext* llmContext_;
+  LlmContext *llmContext_;
   llama_pos configuredNDiscarded_;
   std::function<void(bool)> resetStateCallback_;
   std::string sessionPath_;
