@@ -11,8 +11,7 @@ Request::Request(
     uint32_t rid, std::vector<llama_token>&& toks, unsigned maxTokens,
     llama_pos initialPos)
     : seqId(rid), pendingPrefillTokens(std::move(toks)),
-      prefillTokenCount(pendingPrefillTokens.size()),
-      currentPos(initialPos),
+      prefillTokenCount(pendingPrefillTokens.size()), currentPos(initialPos),
       maxTokensPerSequence(maxTokens) {}
 
 bool Request::isPrefillComplete() const {
@@ -126,9 +125,13 @@ MultiRequestBatcher::FillResult
 MultiRequestBatcher::getChunkSizeForActiveSeqs(const LlamaBatch& batch) const {
   unsigned chunkSize = maxChunkSize_;
   unsigned numActive = 0;
+  unsigned numPrefilling = 0;
   for (const auto& slot :
        slots_ | views::filter(Request::isOptHasTokensToFeed)) {
     numActive++;
+    if (slot->isPrefillPending()) {
+      numPrefilling++;
+    }
     chunkSize = std::min(chunkSize, slot->remainingToFeed());
   }
   if (numActive == 0) {
@@ -141,7 +144,9 @@ MultiRequestBatcher::getChunkSizeForActiveSeqs(const LlamaBatch& batch) const {
       static_cast<unsigned>(batch.capacity()) / numActive;
   chunkSize = std::min(chunkSize, perSeqCap);
 
-  return {.chunkSize = chunkSize, .numActiveSequences = numActive};
+  return {.chunkSize = chunkSize,
+          .numActiveSequences = numActive,
+          .numPrefillingSequences = numPrefilling};
 }
 
 MultiRequestBatcher::FillResult
@@ -187,6 +192,22 @@ MultiRequestBatcher::fillBatch(LlamaBatch& batch) {
   return bState;
 }
 
+namespace {
+void advanceReqPrefill(
+    Request& req, llama_pos chunk,
+    const MultiRequestBatcher::PrefillCompleteFn& onPrefillComplete) {
+  req.prefillFedCount += static_cast<size_t>(chunk);
+  if (req.isPrefillComplete()) {
+    if (onPrefillComplete) {
+      onPrefillComplete(req.seqId, req.currentPos, req.prefillTokenCount);
+    }
+    req.pendingPrefillTokens.clear();
+    req.pendingPrefillTokens.shrink_to_fit();
+    req.prefillFedCount = 0;
+  }
+}
+} // namespace
+
 void MultiRequestBatcher::advance(
     unsigned chunkSize, const PrefillCompleteFn& onPrefillComplete) {
   const llama_pos chunk = static_cast<llama_pos>(chunkSize);
@@ -197,16 +218,7 @@ void MultiRequestBatcher::advance(
       req.stopReason = StopReason::LimitReached;
     }
     if (!req.isPrefillComplete()) {
-      req.prefillFedCount += static_cast<size_t>(chunk);
-      if (req.isPrefillComplete()) {
-        if (onPrefillComplete) {
-          onPrefillComplete(
-              req.seqId, req.currentPos, req.prefillTokenCount);
-        }
-        req.pendingPrefillTokens.clear();
-        req.pendingPrefillTokens.shrink_to_fit();
-        req.prefillFedCount = 0;
-      }
+      advanceReqPrefill(req, chunk, onPrefillComplete);
     } else {
       req.hasUnfedSample = false;
     }
@@ -247,12 +259,9 @@ void MultiRequestBatcher::markAllFinished(StopReason reason) {
 }
 
 std::vector<Request>
-MultiRequestBatcher::extractFinished(const KvClearFn& kvClear) {
+MultiRequestBatcher::extractFinished() {
   std::vector<Request> finished;
   for (auto& slot : slots_ | views::filter(Request::isOptFinished)) {
-    if (kvClear) {
-      kvClear(slot->seqId);
-    }
     finished.push_back(std::move(*slot));
     slot.reset();
   }

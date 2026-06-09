@@ -56,12 +56,19 @@ struct ContextSlideOutcome {
 /// @param nTokensToAppend Number of tokens about to be appended
 /// @param nDiscarded     Maximum tokens the caller allows to discard
 /// @param tools          Controller for tools_compact anchor management
+/// @param ops            Indirection over llama context/memory operations
+/// @param effectiveCtx   Per-sequence token ceiling to slide against. When
+///                       <= 0, falls back to the whole-context size reported
+///                       by ops.nCtx(). In batch mode this is the partitioned
+///                       per-slot cap (ctx / n_parallel), which is smaller
+///                       than the full context.
 /// @return ContextSlideOutcome describing what happened and the new state
 ContextSlideOutcome trySlidePrefill(
     llama_context* lctx, llama_seq_id seqId, llama_pos nPast,
     llama_pos firstMsgTokens, llama_pos nTokensToAppend, llama_pos nDiscarded,
     ToolsCompactController& tools,
-    const IContextSliderOps& ops = defaultContextSliderOps());
+    const IContextSliderOps& ops = defaultContextSliderOps(),
+    llama_pos effectiveCtx = -1);
 
 /// Attempts to slide the context window during generation phase.
 ///
@@ -75,9 +82,14 @@ ContextSlideOutcome trySlidePrefill(
 /// @param firstMsgTokens Number of tokens in the first message (protected)
 /// @param nDiscarded     Maximum tokens the caller allows to discard
 /// @param tools          Controller for tools_compact anchor management
+/// @param ops            Indirection over llama context/memory operations
+/// @param effectiveCtx   Per-sequence token ceiling to slide against. When
+///                       <= 0, falls back to the whole-context size reported
+///                       by ops.nCtx() (single-sequence behaviour).
 /// @return ContextSlideOutcome describing what happened and the new state
 ContextSlideOutcome trySlideGeneration(
     llama_context* lctx, llama_seq_id seqId, llama_pos nPast,
     llama_pos firstMsgTokens, llama_pos nDiscarded,
     ToolsCompactController& tools,
-    const IContextSliderOps& ops = defaultContextSliderOps());
+    const IContextSliderOps& ops = defaultContextSliderOps(),
+    llama_pos effectiveCtx = -1);

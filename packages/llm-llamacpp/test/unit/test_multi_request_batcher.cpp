@@ -273,7 +273,8 @@ protected:
 /// - Step 1: Add req 0 (3 tokens) and req 1 (6 tokens) - 3rd rejected
 /// - Step 2: Batch 1 = min(3,6)=3 → 3+3=6 tokens. Seq 0 done, slot 0 free.
 /// - Step 3: Add req 2 (3 tokens) into slot 0
-/// - Step 4: Batch 2 = min(3 remaining seq 1, 3 req 2)=3 → 3+3=6 tokens. Both done.
+/// - Step 4: Batch 2 = min(3 remaining seq 1, 3 req 2)=3 → 3+3=6 tokens. Both
+/// done.
 /// - Step 5: Add req 3 (3 tokens) into slot 0
 /// - Step 6: Batch 3 = 3 tokens (only req 3 active). Done.
 TEST_F(MultiRequestBatcherTest, BatchFourRequestsWithBatchSizeTwo) {
@@ -345,7 +346,8 @@ TEST_F(MultiRequestBatcherTest, BatchFourRequestsWithBatchSizeTwo) {
       MultiRequestBatcher::AddStatus::Ok);
   EXPECT_EQ(seqId2, 0);
 
-  // === Step 4: Batch 2 = min(3 remaining of seq 1, 3 of req 2)=3 → 6 tokens ===
+  // === Step 4: Batch 2 = min(3 remaining of seq 1, 3 of req 2)=3 → 6 tokens
+  // ===
   result = batcher.fillBatch(batch);
   EXPECT_EQ(result.chunkSize, 3);
   EXPECT_EQ(result.numActiveSequences, 2);
@@ -506,7 +508,8 @@ TEST(MultiRequestBatcherCapacityTest, FillBatchClampsChunkToCapacity) {
   EXPECT_EQ((*batch).n_tokens, batchCapacity);
 }
 
-TEST(MultiRequestBatcherCapacityTest, FillBatchHonoursMaxChunkSizeWhenCapAmple) {
+TEST(
+    MultiRequestBatcherCapacityTest, FillBatchHonoursMaxChunkSizeWhenCapAmple) {
   constexpr unsigned maxChunkSize = 2;
   constexpr unsigned maxTokensPerSeq = 100;
   constexpr size_t batchSize = 2;
@@ -517,11 +520,9 @@ TEST(MultiRequestBatcherCapacityTest, FillBatchHonoursMaxChunkSizeWhenCapAmple) 
 
   uint32_t seqId = 0;
   ASSERT_EQ(
-      batcher.addRequest({1, 2, 3}, seqId),
-      MultiRequestBatcher::AddStatus::Ok);
+      batcher.addRequest({1, 2, 3}, seqId), MultiRequestBatcher::AddStatus::Ok);
   ASSERT_EQ(
-      batcher.addRequest({4, 5, 6}, seqId),
-      MultiRequestBatcher::AddStatus::Ok);
+      batcher.addRequest({4, 5, 6}, seqId), MultiRequestBatcher::AddStatus::Ok);
 
   auto result = batcher.fillBatch(batch);
 
@@ -529,7 +530,9 @@ TEST(MultiRequestBatcherCapacityTest, FillBatchHonoursMaxChunkSizeWhenCapAmple) 
   EXPECT_EQ((*batch).n_tokens, 4);
 }
 
-TEST(MultiRequestBatcherCapacityTest, FillBatchReturnsZeroWhenCapBelowActiveCount) {
+TEST(
+    MultiRequestBatcherCapacityTest,
+    FillBatchReturnsZeroWhenCapBelowActiveCount) {
   constexpr unsigned maxChunkSize = 4;
   constexpr unsigned maxTokensPerSeq = 100;
   constexpr size_t batchSize = 4;
@@ -677,10 +680,9 @@ TEST_F(MultiRequestBatcherTest, PrefillAndGenerationWithMockedDecode) {
   // After 3 generation steps: generatedTokens has 3 sampled tokens.
 
   for (int step = 0; step < 3; step++) {
-    batcher.sampleAndAppendIdle(
-        [this](uint32_t seqId, int logitIdx) {
-          return mocked_llama_sampler_sample(seqId, logitIdx);
-        });
+    batcher.sampleAndAppendIdle([this](uint32_t seqId, int logitIdx) {
+      return mocked_llama_sampler_sample(seqId, logitIdx);
+    });
 
     auto genResult = batcher.fillBatch(batch);
     EXPECT_EQ(genResult.chunkSize, 1);
@@ -716,36 +718,6 @@ TEST_F(MultiRequestBatcherTest, PrefillAndGenerationWithMockedDecode) {
       (std::vector<llama_token>{600, 6000, 60000}));
 }
 
-/// Verifies the KV-cache clear callback passed to extractFinished is invoked
-/// with the correct seqId for every freed slot, before the slot becomes
-/// reusable.
-TEST_F(MultiRequestBatcherTest, ExtractFinishedInvokesKvClearForEachFreedSlot) {
-  MultiRequestBatcher batcher(8, 100, 3);
-
-  uint32_t seqId0 = 0, seqId1 = 0, seqId2 = 0;
-  ASSERT_EQ(
-      batcher.addRequest({1, 2, 3}, seqId0),
-      MultiRequestBatcher::AddStatus::Ok);
-  ASSERT_EQ(
-      batcher.addRequest({4, 5, 6}, seqId1),
-      MultiRequestBatcher::AddStatus::Ok);
-  ASSERT_EQ(
-      batcher.addRequest({7, 8, 9}, seqId2),
-      MultiRequestBatcher::AddStatus::Ok);
-
-  EXPECT_TRUE(batcher.markFinished(seqId0));
-  EXPECT_TRUE(batcher.markFinished(seqId2));
-
-  std::vector<uint32_t> cleared;
-  auto finished = batcher.extractFinished(
-      [&](uint32_t seqId) { cleared.push_back(seqId); });
-
-  ASSERT_EQ(finished.size(), 2);
-  ASSERT_EQ(cleared.size(), 2);
-  EXPECT_EQ(cleared[0], seqId0);
-  EXPECT_EQ(cleared[1], seqId2);
-}
-
 /// Verifies cancel invokes the clear callback exactly when the slot was
 /// actually occupied; canceling a free slot is a no-op on the KV side.
 TEST_F(MultiRequestBatcherTest, CancelInvokesKvClearOnlyWhenSlotOccupied) {
@@ -770,10 +742,9 @@ TEST_F(MultiRequestBatcherTest, CancelInvokesKvClearOnlyWhenSlotOccupied) {
   EXPECT_EQ(cleared.size(), 1);
 }
 
-/// Once extractFinished frees a slot (and the caller's clear callback runs),
-/// the freshly assigned seqId may be safely reused by addRequest without
-/// stale KV entries leaking in.
-TEST_F(MultiRequestBatcherTest, KvClearPrecedesSlotReuse) {
+/// Once extractFinished frees a slot, the freed seqId is handed back to the
+/// next addRequest, so callers can reuse the slot.
+TEST_F(MultiRequestBatcherTest, ExtractFinishedFreesSlotForReuse) {
   MultiRequestBatcher batcher(8, 100, 2);
 
   uint32_t seqId0 = 0, seqId1 = 0;
@@ -786,22 +757,13 @@ TEST_F(MultiRequestBatcherTest, KvClearPrecedesSlotReuse) {
 
   EXPECT_TRUE(batcher.markFinished(seqId0));
 
-  std::vector<uint32_t> cleared;
-  EXPECT_EQ(
-      batcher
-          .extractFinished(
-              [&](uint32_t seqId) { cleared.push_back(seqId); })
-          .size(),
-      1);
-  ASSERT_EQ(cleared.size(), 1);
-  EXPECT_EQ(cleared[0], seqId0);
+  EXPECT_EQ(batcher.extractFinished().size(), 1);
 
   uint32_t seqIdReuse = 99;
   ASSERT_EQ(
       batcher.addRequest({7, 8, 9}, seqIdReuse),
       MultiRequestBatcher::AddStatus::Ok);
   EXPECT_EQ(seqIdReuse, seqId0);
-  EXPECT_EQ(cleared.size(), 1);
 }
 
 /// The batcher must hand the sampler the exact batch index where it set
@@ -842,8 +804,10 @@ TEST_F(MultiRequestBatcherTest, SamplerReceivesMatchingLogitIndex) {
   llama_batch& lBatch = *batch;
   EXPECT_EQ(lBatch.logits[seenIndices[seqId0]], 1);
   EXPECT_EQ(lBatch.logits[seenIndices[seqId1]], 1);
-  EXPECT_EQ(static_cast<uint32_t>(lBatch.seq_id[seenIndices[seqId0]][0]), seqId0);
-  EXPECT_EQ(static_cast<uint32_t>(lBatch.seq_id[seenIndices[seqId1]][0]), seqId1);
+  EXPECT_EQ(
+      static_cast<uint32_t>(lBatch.seq_id[seenIndices[seqId0]][0]), seqId0);
+  EXPECT_EQ(
+      static_cast<uint32_t>(lBatch.seq_id[seenIndices[seqId1]][0]), seqId1);
 }
 
 /// When a slot finishes prefill in chunk N but another slot is still
@@ -860,8 +824,7 @@ TEST_F(MultiRequestBatcherTest, NoSampleWhenChunkDoesNotFinishPrefill) {
 
   uint32_t seqId0 = 0, seqId1 = 0;
   ASSERT_EQ(
-      batcher.addRequest({10, 20}, seqId0),
-      MultiRequestBatcher::AddStatus::Ok);
+      batcher.addRequest({10, 20}, seqId0), MultiRequestBatcher::AddStatus::Ok);
   ASSERT_EQ(
       batcher.addRequest({40, 50, 60, 70}, seqId1),
       MultiRequestBatcher::AddStatus::Ok);

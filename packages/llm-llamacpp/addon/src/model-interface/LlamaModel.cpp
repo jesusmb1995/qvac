@@ -11,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <common/arg.h>
@@ -223,15 +224,18 @@ void LlamaModel::tuneConfigMap(
 #endif
   if (isOpenCl || kIsMetal) {
     auto isTurboQuantKvType = [](const std::string& v) {
-      return v == "tbq3_0" || v == "tbq4_0" ||
-             v == "pq3_0"  || v == "pq4_0";
+      return v == "tbq3_0" || v == "tbq4_0" || v == "pq3_0" || v == "pq4_0";
     };
-    auto checkCacheType = [&](const char* hyphenKey, const char* underscoreKey,
+    auto checkCacheType = [&](const char* hyphenKey,
+                              const char* underscoreKey,
                               const char* side) {
       auto it = configFilemap.find(hyphenKey);
-      if (it == configFilemap.end()) it = configFilemap.find(underscoreKey);
-      if (it == configFilemap.end()) return;
-      if (!isTurboQuantKvType(it->second)) return;
+      if (it == configFilemap.end())
+        it = configFilemap.find(underscoreKey);
+      if (it == configFilemap.end())
+        return;
+      if (!isTurboQuantKvType(it->second))
+        return;
       const char* backendName = isOpenCl ? "OpenCL" : "Metal";
       throw qvac_errors::StatusError(
           qvac_errors::general_error::InvalidArgument,
@@ -713,6 +717,11 @@ LlamaModel::processPromptBatch(const std::vector<Prompt>& prompts) {
   return processPromptBatchImpl(prompts);
 }
 
+bool LlamaModel::supportsBatching() const {
+  std::shared_lock lock(stateMtx_);
+  return state_ && isMultiBatchActivated(*state_);
+}
+
 std::vector<std::string>
 LlamaModel::processPromptBatchImpl(const std::vector<Prompt>& prompts) {
   validateBitnetQuantization();
@@ -734,8 +743,18 @@ LlamaModel::processPromptBatchImpl(const std::vector<Prompt>& prompts) {
 
   std::vector<batching::SubmitRequest> requests;
   requests.reserve(prompts.size());
+  std::unordered_set<std::string> saveCacheKeys;
   for (size_t i = 0; i < prompts.size(); i++) {
     const Prompt& prompt = prompts[i];
+    if (prompt.saveCacheToDisk && !prompt.cacheKey.empty() &&
+        !saveCacheKeys.insert(prompt.cacheKey).second) {
+      throw qvac_errors::StatusError(
+          ADDON_ID,
+          toString(qvac_errors::general_error::InvalidArgument),
+          "processPromptBatch: duplicate cacheKey '" + prompt.cacheKey +
+              "' with saveCacheToDisk in the same batch would overwrite "
+              "itself; each saved cache must use a distinct key");
+    }
     if (!prompt.media.empty()) {
       throw qvac_errors::StatusError(
           ADDON_ID,
@@ -796,13 +815,6 @@ LlamaModel::batchRuntimeStatsLocked() const {
   // in-flight batches without LlamaModel having to cache state.
   const batching::RuntimeStatsSnapshot stats =
       state_->batchScheduler_->runtimeStats();
-  constexpr double kMillisInSecond = 1000.0;
-  const double elapsedMs = stats.elapsedMs();
-  const double tokensPerSecond =
-      elapsedMs > 0.0
-          ? kMillisInSecond / elapsedMs *
-                static_cast<double>(stats.generatedTokens)
-          : 0.0;
   // TTFT comes from `llama_perf_context` to match legacy single-prompt
   // semantics; the scheduler does not yet expose a batch-aware TTFT.
   // Reset the perf counters so the next single-prompt run sees a clean
@@ -811,7 +823,8 @@ LlamaModel::batchRuntimeStatsLocked() const {
   llama_perf_context_reset(state_->llmContext_->getCtx());
   return {
       {"TTFT", perfData.t_p_eval_ms},
-      {"TPS", tokensPerSecond},
+      {"TPS", stats.decodeTokensPerSecond()},
+      {"ppTPS", stats.prefillTokensPerSecond()},
       {"CacheTokens", stats.cacheTokens},
       {"generatedTokens", stats.generatedTokens},
       {"promptTokens", stats.promptTokens},
@@ -846,7 +859,8 @@ LlamaModel::singleRuntimeStatsLocked() const {
       {"CacheTokens", static_cast<int64_t>(state_->llmContext_->getNPast())},
       {"generatedTokens", generatedTokens},
       {"promptTokens", promptTokens},
-      {"contextSlides", static_cast<int64_t>(state_->llmContext_->getNSlides())},
+      {"contextSlides",
+       static_cast<int64_t>(state_->llmContext_->getNSlides())},
       {"avgConcurrentSeq", 1.0},
       {"backendDevice", runtimeBackendDevice_}};
 }
@@ -943,8 +957,7 @@ void LlamaModel::commonParamsParse(
     const char* begin = raw.data();
     const char* end = begin + raw.size();
     const auto [ptr, ec] = std::from_chars(begin, end, value);
-    if (ec != std::errc{} || ptr != end ||
-        (value != 0 && value != -1)) {
+    if (ec != std::errc{} || ptr != end || (value != 0 && value != -1)) {
       throw qvac_errors::StatusError(
           ADDON_ID,
           qvac_errors::general_error::toString(
@@ -1139,8 +1152,8 @@ void LlamaModel::commonParamsParse(
     }
   }
 
-  auto ctxArg =
-      common_params_parser_init(params, LLAMA_EXAMPLE_COMMON, [](int, char**) {});
+  auto ctxArg = common_params_parser_init(
+      params, LLAMA_EXAMPLE_COMMON, [](int, char**) {});
 
   // disable warmup run
   params.warmup = false;

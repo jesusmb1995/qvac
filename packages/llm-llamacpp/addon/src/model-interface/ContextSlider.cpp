@@ -40,9 +40,12 @@ const IContextSliderOps& defaultContextSliderOps() {
 ContextSlideOutcome trySlidePrefill(
     llama_context* lctx, llama_seq_id seqId, llama_pos nPast,
     llama_pos firstMsgTokens, llama_pos nTokensToAppend, llama_pos nDiscarded,
-    ToolsCompactController& tools, const IContextSliderOps& ops) {
+    ToolsCompactController& tools, const IContextSliderOps& ops,
+    llama_pos effectiveCtx) {
 
-  const auto nCtx = ops.nCtx(lctx);
+  // In batch mode the slot's usable window is the per-sequence cap, smaller
+  // than the whole context; <= 0 means single-sequence, use the full context.
+  const auto nCtx = effectiveCtx > 0 ? effectiveCtx : ops.nCtx(lctx);
 
   // Check if sliding is needed
   if (nPast + nTokensToAppend < nCtx) {
@@ -83,10 +86,10 @@ ContextSlideOutcome trySlidePrefill(
 ContextSlideOutcome trySlideGeneration(
     llama_context* lctx, llama_seq_id seqId, llama_pos nPast,
     llama_pos firstMsgTokens, llama_pos nDiscarded,
-    ToolsCompactController& tools,
-    const IContextSliderOps& ops) {
+    ToolsCompactController& tools, const IContextSliderOps& ops,
+    llama_pos effectiveCtx) {
 
-  const auto nCtx = ops.nCtx(lctx);
+  const auto nCtx = effectiveCtx > 0 ? effectiveCtx : ops.nCtx(lctx);
 
   // Check if sliding is needed (need room for 1 more token)
   if (nPast + 1 <= nCtx || nDiscarded == 0) {

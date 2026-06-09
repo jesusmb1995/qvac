@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -12,7 +12,7 @@
 
 #include <ggml-backend.h>
 #include <gtest/gtest.h>
-#include <qvac-lib-inference-addon-cpp/Errors.hpp>
+#include <inference-addon-cpp/Errors.hpp>
 
 #include "model-interface/LlamaModel.hpp"
 #include "test_common.hpp"
@@ -105,26 +105,26 @@ protected:
     config_["backendsDir"] = test_common::getTestBackendsDir().string();
 
     model_ =
-        MP("Llama-3.2-1B-Instruct-Q4_0.gguf", nullptr, MP::OnMissing::Skip,
+        MP("Llama-3.2-1B-Instruct-Q4_0.gguf",
+           nullptr,
+           MP::OnMissing::Skip,
            "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF");
-    qwen3Model_ = MP(
-        "Qwen3-0.6B.Q4_0.gguf",
-        "QWEN3_BATCH_MODEL_PATH",
-        MP::OnMissing::Skip,
-        "https://huggingface.co/QuantFactory/Qwen3-0.6B-GGUF");
-    harmonyModel_ = MP(
-        "gpt-oss-20b-Q2_K.gguf",
-        "HARMONY_BATCH_MODEL_PATH",
-        MP::OnMissing::Skip,
-        "https://huggingface.co/mradermacher/gpt-oss-20b-GGUF");
+    qwen3Model_ =
+        MP("Qwen3-0.6B.Q4_0.gguf",
+           "QWEN3_BATCH_MODEL_PATH",
+           MP::OnMissing::Skip,
+           "https://huggingface.co/QuantFactory/Qwen3-0.6B-GGUF");
+    harmonyModel_ =
+        MP("gpt-oss-20b-Q2_K.gguf",
+           "HARMONY_BATCH_MODEL_PATH",
+           MP::OnMissing::Skip,
+           "https://huggingface.co/mradermacher/gpt-oss-20b-GGUF");
   }
 
-  std::unique_ptr<LlamaModel> loadModel() {
-    return loadModel(model_);
-  }
+  std::unique_ptr<LlamaModel> loadModel() { return loadModel(model_); }
 
-  std::unique_ptr<LlamaModel> loadModel(
-      const test_common::TestModelPath& modelPath) {
+  std::unique_ptr<LlamaModel>
+  loadModel(const test_common::TestModelPath& modelPath) {
     std::string path = model_.path;
     std::string projection;
     auto cfg = config_;
@@ -137,8 +137,7 @@ protected:
 
   static LlamaModel::Prompt makePrompt(const std::string& userText) {
     LlamaModel::Prompt p;
-    p.input =
-        R"([{"role":"user","content":")" + userText + R"("}])";
+    p.input = R"([{"role":"user","content":")" + userText + R"("}])";
     return p;
   }
 
@@ -187,8 +186,9 @@ TEST_F(ContinuousBatchingIntegrationTest, TwoPromptsReturnExpectedAnswers) {
 
   std::vector<LlamaModel::Prompt> prompts{
       makePrompt("What is the capital of France? Answer in one word."),
-      makePrompt("What is the natural satellite that orbits Earth? "
-                 "Answer in one word.")};
+      makePrompt(
+          "What is the natural satellite that orbits Earth? "
+          "Answer in one word.")};
   auto outputs = model->processPromptBatch(prompts);
 
   ASSERT_EQ(outputs.size(), 2u);
@@ -224,6 +224,40 @@ TEST_F(ContinuousBatchingIntegrationTest, TwoPromptBatchReportsAvgConcurrency) {
   EXPECT_GE(contextSlides, 0.0);
 }
 
+/// A real batched run must report both phase-separated throughput rates:
+/// a decode rate from generation steps and a prompt-processing rate from
+/// pure-prefill steps. Prefill is compute-bound and decode is
+/// bandwidth-bound, so prompt processing runs faster per token.
+TEST_F(
+    ContinuousBatchingIntegrationTest, BatchReportsPhaseSeparatedThroughput) {
+  REQUIRE_MODEL(model_);
+  config_["n_predict"] = "32";
+  auto model = loadModel();
+
+  std::vector<LlamaModel::Prompt> prompts{
+      makePrompt("Write a short paragraph about redwood forests."),
+      makePrompt("Write a short paragraph about coral reefs.")};
+  auto outputs = model->processPromptBatch(prompts);
+  const auto stats = model->runtimeStats();
+
+  const double decodeTps = test_common::getStatValue(stats, "TPS");
+  const double prefillTps = test_common::getStatValue(stats, "ppTPS");
+  const double generatedTokens =
+      test_common::getStatValue(stats, "generatedTokens");
+  const double promptTokens = test_common::getStatValue(stats, "promptTokens");
+
+  ASSERT_EQ(outputs.size(), 2u);
+  EXPECT_FALSE(outputs[0].empty());
+  EXPECT_FALSE(outputs[1].empty());
+  EXPECT_GT(generatedTokens, 0.0);
+  EXPECT_GT(promptTokens, 0.0);
+  EXPECT_GT(decodeTps, 0.0);
+  EXPECT_GT(prefillTps, 0.0);
+  EXPECT_GT(prefillTps, decodeTps)
+      << "prefill should out-pace decode per token: prefillTps=" << prefillTps
+      << ", decodeTps=" << decodeTps;
+}
+
 TEST_F(
     ContinuousBatchingIntegrationTest,
     OneAndThreeOverlappingBatchCallsShareTwoSlots) {
@@ -240,15 +274,15 @@ TEST_F(
   auto firstFuture = std::async(
       std::launch::async,
       [&model, firstPrompt, &firstCallEntered, &firstBatchDone] {
-    std::vector<LlamaModel::Prompt> prompts{firstPrompt};
-    firstCallEntered.store(true);
-    auto outputs = model->processPromptBatch(prompts);
-    firstBatchDone.store(true);
-    return outputs;
-  });
+        std::vector<LlamaModel::Prompt> prompts{firstPrompt};
+        firstCallEntered.store(true);
+        auto outputs = model->processPromptBatch(prompts);
+        firstBatchDone.store(true);
+        return outputs;
+      });
 
-  const auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::seconds(30);
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!firstCallEntered.load() &&
          std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -258,20 +292,20 @@ TEST_F(
   auto secondFuture = std::async(
       std::launch::async,
       [&model, &firstBatchDone, &secondBatchEmittedBeforeFirstDone] {
-    auto secondPrompt = makePrompt("List facts about coral reefs.");
-    secondPrompt.outputCallback =
-        [&firstBatchDone, &secondBatchEmittedBeforeFirstDone](
-            const std::string&) {
-          if (!firstBatchDone.load()) {
-            secondBatchEmittedBeforeFirstDone.store(true);
-          }
-        };
-    std::vector<LlamaModel::Prompt> prompts{
-        std::move(secondPrompt),
-        makePrompt("List facts about alpine glaciers."),
-        makePrompt("List facts about desert wildflowers.")};
-    return model->processPromptBatch(prompts);
-  });
+        auto secondPrompt = makePrompt("List facts about coral reefs.");
+        secondPrompt.outputCallback =
+            [&firstBatchDone,
+             &secondBatchEmittedBeforeFirstDone](const std::string&) {
+              if (!firstBatchDone.load()) {
+                secondBatchEmittedBeforeFirstDone.store(true);
+              }
+            };
+        std::vector<LlamaModel::Prompt> prompts{
+            std::move(secondPrompt),
+            makePrompt("List facts about alpine glaciers."),
+            makePrompt("List facts about desert wildflowers.")};
+        return model->processPromptBatch(prompts);
+      });
 
   ASSERT_EQ(
       firstFuture.wait_for(std::chrono::seconds(60)),
@@ -295,8 +329,7 @@ TEST_F(
       test_common::getStatValue(stats, "avgConcurrentSeq");
   std::cout
       << "OneAndThreeOverlappingBatchCallsShareTwoSlots: avgConcurrentSeq="
-      << avgConcurrentSeq
-      << ", secondGroupEmittedBeforeFirstDone="
+      << avgConcurrentSeq << ", secondGroupEmittedBeforeFirstDone="
       << secondBatchEmittedBeforeFirstDone.load() << '\n';
   // If the scheduler ran separate waves (1 -> 2 -> 1), equal-length requests
   // would average about 1.33 occupied slots. This higher threshold, plus the
@@ -313,8 +346,7 @@ TEST_F(ContinuousBatchingIntegrationTest, FourPromptBatchReportsHigherTps) {
     GTEST_SKIP() << "requires GPU backend for throughput comparison";
   }
   if (!hasRealGpuBackendDevice()) {
-    GTEST_SKIP()
-        << "requires hardware GPU backend for throughput comparison";
+    GTEST_SKIP() << "requires hardware GPU backend for throughput comparison";
   }
 
   struct TimedOutputs {
@@ -391,16 +423,14 @@ TEST_F(ContinuousBatchingIntegrationTest, FourPromptBatchReportsHigherTps) {
   EXPECT_GT(twoTps, 0.0);
   EXPECT_GT(fourTps, 0.0);
   std::cout << "FourPromptBatchReportsHigherTps: single TPS=" << singleTps
-            << ", two-prompt TPS=" << twoTps
-            << ", four-prompt TPS=" << fourTps
+            << ", two-prompt TPS=" << twoTps << ", four-prompt TPS=" << fourTps
             << ", single avgConcurrentSeq=" << singleAvgConcurrentSeq
             << ", two avgConcurrentSeq=" << twoAvgConcurrentSeq
             << ", four avgConcurrentSeq=" << fourAvgConcurrentSeq
             << ", single generatedTokens=" << singleGeneratedTokens
             << ", two generatedTokens=" << twoGeneratedTokens
             << ", four generatedTokens=" << fourGeneratedTokens
-            << ", single elapsedMsPerPrompt="
-            << singleRun.elapsedMsPerPrompt
+            << ", single elapsedMsPerPrompt=" << singleRun.elapsedMsPerPrompt
             << ", two elapsedMsPerPrompt=" << twoRun.elapsedMsPerPrompt
             << ", four elapsedMsPerPrompt=" << fourRun.elapsedMsPerPrompt
             << '\n';
@@ -522,7 +552,8 @@ TEST_F(ContinuousBatchingIntegrationTest, OutputCallbackStreamsPieces) {
 
 /// Two prompts in the same batch must stream to their own callbacks without
 /// mixing pieces between sequences.
-TEST_F(ContinuousBatchingIntegrationTest, TwoPromptCallbacksStreamIndependently) {
+TEST_F(
+    ContinuousBatchingIntegrationTest, TwoPromptCallbacksStreamIndependently) {
   REQUIRE_MODEL(model_);
   auto model = loadModel();
 
@@ -549,7 +580,8 @@ TEST_F(ContinuousBatchingIntegrationTest, TwoPromptCallbacksStreamIndependently)
 /// Tool definitions are per-request prompt inputs. A two-text batch must
 /// preserve them in the formatted prompt instead of silently dropping them or
 /// rejecting the whole batch.
-TEST_F(ContinuousBatchingIntegrationTest, TwoPromptBatchAcceptsToolDefinitions) {
+TEST_F(
+    ContinuousBatchingIntegrationTest, TwoPromptBatchAcceptsToolDefinitions) {
   REQUIRE_MODEL(model_);
   config_["tools"] = "true";
   auto model = loadModel();
@@ -563,7 +595,8 @@ TEST_F(ContinuousBatchingIntegrationTest, TwoPromptBatchAcceptsToolDefinitions) 
   EXPECT_FALSE(outputs[1].empty());
 }
 
-TEST_F(ContinuousBatchingIntegrationTest, TwoPromptBatchQwen3ClosesThinkBlocks) {
+TEST_F(
+    ContinuousBatchingIntegrationTest, TwoPromptBatchQwen3ClosesThinkBlocks) {
   REQUIRE_MODEL(qwen3Model_);
   config_["ctx_size"] = "4096";
   config_["n_predict"] = "512";
@@ -590,8 +623,7 @@ TEST_F(ContinuousBatchingIntegrationTest, TwoPromptBatchHarmonyToolCalls) {
   config_["tools"] = "true";
   auto model = loadModel(harmonyModel_);
 
-  std::vector<LlamaModel::Prompt> prompts{
-      makeToolPrompt(), makeToolPrompt()};
+  std::vector<LlamaModel::Prompt> prompts{makeToolPrompt(), makeToolPrompt()};
   auto outputs = model->processPromptBatch(prompts);
 
   ASSERT_EQ(outputs.size(), 2u);
@@ -641,13 +673,84 @@ TEST_F(ContinuousBatchingIntegrationTest, TwoPromptBatchSavesAndLoadsCache) {
   fs::remove(cachePath);
 }
 
+/// Two prompts in ONE batch that save to the SAME non-empty `cacheKey`
+/// would clobber each other on disk (last-writer-wins, no per-prompt
+/// isolation). The scheduler cannot resolve which writer should win, so
+/// the batch must be rejected up front with `InvalidArgument` rather than
+/// silently corrupting one prompt's cache.
+TEST_F(
+    ContinuousBatchingIntegrationTest,
+    DuplicateSaveCacheKeyInBatchIsRejected) {
+  REQUIRE_MODEL(model_);
+  auto model = loadModel();
+
+  const fs::path shared =
+      fs::temp_directory_path() / ("dupe-shared-" + uniqueTestId() + ".bin");
+
+  auto a = makePrompt("Remember this short setup.");
+  a.cacheKey = shared.string();
+  a.saveCacheToDisk = true;
+  auto b = makePrompt("Say several words about the sky.");
+  b.cacheKey = shared.string();
+  b.saveCacheToDisk = true;
+  std::vector<LlamaModel::Prompt> batch{std::move(a), std::move(b)};
+
+  try {
+    model->processPromptBatch(batch);
+    FAIL() << "expected processPromptBatch to reject duplicate save cacheKey";
+  } catch (const qvac_errors::StatusError& e) {
+    EXPECT_NE(
+        e.codeString().find(
+            toString(qvac_errors::general_error::InvalidArgument)),
+        std::string::npos);
+  }
+
+  // The guard runs before scheduling, so nothing is written to disk.
+  EXPECT_FALSE(fs::exists(shared));
+  fs::remove(shared);
+}
+
+/// Sharing the same non-empty `cacheKey` for READ-only prompts (no
+/// `saveCacheToDisk`) is a legitimate cache-warming pattern and must NOT
+/// be rejected: no writer means no clobber.
+TEST_F(
+    ContinuousBatchingIntegrationTest,
+    DuplicateReadOnlyCacheKeyInBatchIsAllowed) {
+  REQUIRE_MODEL(model_);
+  auto model = loadModel();
+
+  const fs::path shared =
+      fs::temp_directory_path() / ("shared-read-" + uniqueTestId() + ".bin");
+
+  // Seed a cache file once, then have two prompts read it concurrently.
+  auto seed = makePrompt("Remember this short setup.");
+  seed.prefill = true;
+  seed.cacheKey = shared.string();
+  seed.saveCacheToDisk = true;
+  std::vector<LlamaModel::Prompt> seedBatch{std::move(seed)};
+  model->processPromptBatch(seedBatch);
+  ASSERT_TRUE(fs::exists(shared));
+
+  auto a = makePrompt("Say plain text.");
+  a.cacheKey = shared.string();
+  auto b = makePrompt("Say more plain text.");
+  b.cacheKey = shared.string();
+  std::vector<LlamaModel::Prompt> batch{std::move(a), std::move(b)};
+
+  auto outputs = model->processPromptBatch(batch);
+  ASSERT_EQ(outputs.size(), 2u);
+  EXPECT_FALSE(outputs[0].empty());
+  EXPECT_FALSE(outputs[1].empty());
+
+  fs::remove(shared);
+}
+
 TEST_F(ContinuousBatchingIntegrationTest, BatchCancelUsesPolicyAndSavesCache) {
   REQUIRE_MODEL(model_);
   config_["n_predict"] = "128";
   auto model = loadModel();
-  const fs::path cachePath =
-      fs::temp_directory_path() /
-      ("batch-cancel-cache-" + uniqueTestId() + ".bin");
+  const fs::path cachePath = fs::temp_directory_path() /
+                             ("batch-cancel-cache-" + uniqueTestId() + ".bin");
 
   std::atomic<bool> cancelOnce = false;
   auto cachedPrompt = makePrompt(
@@ -681,6 +784,114 @@ TEST_F(ContinuousBatchingIntegrationTest, BatchCancelUsesPolicyAndSavesCache) {
   EXPECT_FALSE(followupOutputs[0].empty());
 
   fs::remove(cachePath);
+}
+
+/// Cancel-all (`model.cancel()`) must cancel BOTH the actively-decoding
+/// slots and the prompts still queued in `pending_` (the overflow beyond
+/// `parallel`). Regression for the leak where, after the active slots are
+/// freed, `workerLoop()` admitted the queued prompts and ran them to
+/// completion *after* the cancel — so cancelled work kept generating.
+///
+/// Setup: `parallel = 2` with 6 prompts, so 4 sit in `pending_`. The first
+/// emitted token (necessarily from an active slot) triggers `cancel()`. If
+/// any *pending* prompt then emits a token, it was admitted and run after
+/// the cancel — the bug. With the fix the queued prompts are drained as
+/// cancelled and never generate.
+TEST_F(ContinuousBatchingIntegrationTest, CancelAllAlsoCancelsPendingPrompts) {
+  REQUIRE_MODEL(model_);
+  config_["parallel"] = "2";
+  config_["n_predict"] = "64";
+  auto model = loadModel();
+
+  constexpr size_t kParallel = 2;
+  constexpr size_t kPromptCount = 6; // 4 prompts overflow into pending_
+
+  std::atomic<bool> cancelFired = false;
+  std::atomic<bool> pendingRanAfterCancel = false;
+
+  std::vector<LlamaModel::Prompt> prompts;
+  for (size_t i = 0; i < kPromptCount; ++i) {
+    auto p = makePrompt(
+        "Write a long, detailed paragraph about the history of astronomy.");
+    const bool isPending = i >= kParallel;
+    p.outputCallback =
+        [&model, &cancelFired, &pendingRanAfterCancel, isPending](
+            const std::string&) {
+          // First token (from an active slot) requests a cancel-all.
+          bool expected = false;
+          if (cancelFired.compare_exchange_strong(expected, true)) {
+            model->cancel();
+            return;
+          }
+          // A queued (overflow) prompt that emits *after* the cancel was
+          // requested proves it was admitted and run post-cancel.
+          if (isPending && cancelFired.load()) {
+            pendingRanAfterCancel.store(true);
+          }
+        };
+    prompts.push_back(std::move(p));
+  }
+
+  // Cancel-all reports the un-run queued prompts by throwing `Cancelled`
+  // (see CancelAllThrowsForUnrunPendingPrompts); this test only cares that
+  // none of those queued prompts actually executed, which holds whether the
+  // call throws or returns.
+  try {
+    model->processPromptBatch(prompts);
+  } catch (const qvac_errors::StatusError&) {
+    // expected once the pending prompts are surfaced as cancelled
+  }
+
+  ASSERT_TRUE(cancelFired.load())
+      << "test setup: no token was emitted, so cancel never fired";
+  EXPECT_FALSE(pendingRanAfterCancel.load())
+      << "CANCEL-ALL LEAK: a queued (pending_) prompt generated tokens after "
+         "model.cancel(); cancel-all freed the active slots and then admitted "
+         "the overflow prompts instead of cancelling them.";
+}
+
+/// Cancel-all must surface the queued prompts that never got a chance to
+/// run as an error, not as silently-successful empty outputs. In-flight
+/// slots are cancelled gracefully (partial output, no throw), but a prompt
+/// still sitting in `pending_` produced nothing because it was cancelled
+/// before admission — that is a cancellation, and the batch call must throw
+/// `Cancelled` rather than return empty strings that look like success.
+///
+/// Setup mirrors CancelAllAlsoCancelsPendingPrompts: `parallel = 2` with 6
+/// prompts so 4 are queued; the first emitted token triggers `cancel()`.
+TEST_F(
+    ContinuousBatchingIntegrationTest, CancelAllThrowsForUnrunPendingPrompts) {
+  REQUIRE_MODEL(model_);
+  config_["parallel"] = "2";
+  config_["n_predict"] = "64";
+  auto model = loadModel();
+
+  constexpr size_t kPromptCount = 6; // 4 prompts overflow into pending_
+  std::atomic<bool> cancelFired = false;
+
+  std::vector<LlamaModel::Prompt> prompts;
+  for (size_t i = 0; i < kPromptCount; ++i) {
+    auto p = makePrompt(
+        "Write a long, detailed paragraph about the history of astronomy.");
+    p.outputCallback = [&model, &cancelFired](const std::string&) {
+      bool expected = false;
+      if (cancelFired.compare_exchange_strong(expected, true)) {
+        model->cancel();
+      }
+    };
+    prompts.push_back(std::move(p));
+  }
+
+  try {
+    model->processPromptBatch(prompts);
+    FAIL() << "expected cancel-all to throw for queued prompts that never ran "
+              "instead of returning empty success outputs";
+  } catch (const qvac_errors::StatusError& e) {
+    EXPECT_NE(e.codeString().find("Cancelled"), std::string::npos)
+        << "expected a Cancelled error code, got: " << e.codeString();
+  }
+  EXPECT_TRUE(cancelFired.load())
+      << "test setup: no token was emitted, so cancel never fired";
 }
 
 TEST_F(ContinuousBatchingIntegrationTest, TwoPromptBatchAcceptsPrefillOnly) {

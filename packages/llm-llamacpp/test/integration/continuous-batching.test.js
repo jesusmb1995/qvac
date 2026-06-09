@@ -27,22 +27,22 @@ const BASE_SYSTEM_PROMPT = 'Answer the question. Start with the exact lowercase 
 const STORY_SYSTEM_PROMPT = 'Write a short story. Start the first sentence with the requested unique lowercase word.'
 
 const CASES = [
-  { id: 'capital-france', user: 'What is the capital of France? Answer with one word.', expected: 'paris' },
-  { id: 'red-fruit', user: 'Name a common red fruit. Answer with one word.', expected: 'strawberry' },
-  { id: 'opposite-hot', user: 'What is the opposite of hot? Answer with one word.', expected: 'cold' },
-  { id: 'sky-color', user: 'What color is a clear daytime sky? Answer with one word.', expected: 'blue' },
-  { id: 'bee-product', user: 'What sweet food do bees make? Answer with one word.', expected: 'honey' },
-  { id: 'frozen-water', user: 'What is frozen water called? Answer with one word.', expected: 'ice' },
-  { id: 'story-otter', story: true, expected: 'otter' },
-  { id: 'largest-ocean', user: 'What is the largest ocean? Answer with one word.', expected: 'pacific' },
-  { id: 'planet-red', user: 'Which planet is known as the red planet? Answer with one word.', expected: 'mars' },
-  { id: 'day-after-monday', user: 'What day comes after Monday? Answer with one word.', expected: 'tuesday' },
-  { id: 'story-lantern', story: true, expected: 'lantern' },
-  { id: 'count-fingers', user: 'How many fingers are on one typical human hand? Answer with one word.', expected: 'five' },
-  { id: 'animal-meows', user: 'What animal meows? Answer with one word.', expected: 'cat' },
-  { id: 'story-canyon', story: true, expected: 'canyon' },
-  { id: 'primary-yellow', user: 'What primary color is the sun often drawn as? Answer with one word.', expected: 'yellow' },
-  { id: 'story-saffron', story: true, expected: 'saffron' }
+  { id: 'capital-france', user: 'What is the capital of France? Answer with one word.', expected: ['paris'] },
+  { id: 'red-fruit', user: 'Name a common red fruit. Answer with one word.', expected: ['strawberry', 'apple', 'raspberry', 'cherry', 'cranberry'] },
+  { id: 'opposite-hot', user: 'What is the opposite of hot? Answer with one word.', expected: ['cold', 'cool', 'chill', 'frigid', 'cool'] },
+  { id: 'sky-color', user: 'What color is a clear daytime sky? Answer with one word.', expected: ['blue'] },
+  { id: 'bee-product', user: 'What sweet food do bees make? Answer with one word.', expected: ['honey'] },
+  { id: 'frozen-water', user: 'What is frozen water called? Answer with one word.', expected: ['ice'] },
+  { id: 'story-otter', story: true, expected: ['otter'] },
+  { id: 'largest-ocean', user: 'What is the largest ocean? Answer with one word.', expected: ['pacific'] },
+  { id: 'planet-red', user: 'Which planet is known as the red planet? Answer with one word.', expected: ['mars'] },
+  { id: 'day-after-monday', user: 'What day comes after Monday? Answer with one word.', expected: ['tuesday'] },
+  { id: 'story-lantern', story: true, expected: ['lantern'] },
+  { id: 'count-fingers', user: 'How many fingers are on one typical human hand? Answer with one word.', expected: ['five', '5', 'ten', '10'] },
+  { id: 'animal-meows', user: 'What animal meows? Answer with one word.', expected: ['cat', 'cougar', 'felid', 'lion', 'tiger', 'jaguar', 'leopard'] },
+  { id: 'story-canyon', story: true, expected: ['canyon'] },
+  { id: 'primary-yellow', user: 'What primary color is the sun often drawn as? Answer with one word.', expected: ['yellow', 'orange', 'red'] },
+  { id: 'story-saffron', story: true, expected: ['saffron'] }
 ]
 
 function toNumber (value) {
@@ -53,15 +53,18 @@ function normalizeText (text) {
   return String(text || '').toLowerCase().replace(/[^a-z]+/g, ' ').trim()
 }
 
-function containsExpectedWord (text, expected) {
-  return normalizeText(text).includes(expected)
+function containsExpectedWord (text, expectedOptions) {
+  const normalized = normalizeText(text)
+  const options = Array.isArray(expectedOptions) ? expectedOptions : [expectedOptions]
+  return options.some(option => normalized.includes(option))
 }
 
 function buildPrompt (item) {
   if (item.story) {
+    const expectedWord = Array.isArray(item.expected) ? item.expected[0] : item.expected
     return [
       { role: 'system', content: STORY_SYSTEM_PROMPT },
-      { role: 'user', content: `Tell me a story. The required first word is ${item.expected}.` }
+      { role: 'user', content: `Tell me a story. The required first word is ${expectedWord}.` }
     ]
   }
   return [

@@ -121,6 +121,45 @@ TEST_F(ContextSliderTest, PrefillSlidInvokesLlamaOpsWithExpectedRanges) {
   EXPECT_EQ(ops.seqAddCalls()[0].delta, -100);
 }
 
+// Batch mode partitions the KV pool into per-slot caps (ctx / n_parallel)
+// that are far smaller than the whole-context size. A cached prompt can fit
+// the full context yet overflow its slot; the slide must trigger against the
+// per-sequence cap so n_discarded can free room before the scheduler rejects
+// the prompt. Regression for PR #2327 review r3344885390.
+TEST_F(ContextSliderTest, PrefillSlidesAgainstPerSeqCapBelowFullCtx) {
+  ToolsCompactController controller(std::nullopt);
+  FakeLlamaContextOps ops(/*ctxSize=*/8192);
+
+  // nPast + append = 2100: over the per-seq cap (2048) but well under the
+  // full context (8192). Sliding against the full ctx would do nothing.
+  ContextSlideOutcome outcome = trySlidePrefill(
+      /*lctx=*/nullptr,
+      kSeqId,
+      /*nPast=*/1900,
+      /*firstMsgTokens=*/50,
+      /*nTokensToAppend=*/200,
+      /*nDiscarded=*/512,
+      controller,
+      ops,
+      /*effectiveCtx=*/2048);
+
+  EXPECT_EQ(outcome.kind, ContextSlideOutcome::Kind::Slid);
+  EXPECT_EQ(outcome.newNPast, 1388);
+  EXPECT_EQ(outcome.discarded, 512);
+
+  ASSERT_EQ(ops.memoryCalls(), 1);
+  ASSERT_EQ(ops.seqRmCalls().size(), 1u);
+  EXPECT_EQ(ops.seqRmCalls()[0].seqId, kSeqId);
+  EXPECT_EQ(ops.seqRmCalls()[0].startPos, 50);
+  EXPECT_EQ(ops.seqRmCalls()[0].endPos, 562);
+
+  ASSERT_EQ(ops.seqAddCalls().size(), 1u);
+  EXPECT_EQ(ops.seqAddCalls()[0].seqId, kSeqId);
+  EXPECT_EQ(ops.seqAddCalls()[0].startPos, 562);
+  EXPECT_EQ(ops.seqAddCalls()[0].endPos, 1900);
+  EXPECT_EQ(ops.seqAddCalls()[0].delta, -512);
+}
+
 TEST_F(ContextSliderTest, PrefillFullWipeInvokesSeqRmOnly) {
   ToolsCompactController controller(ToolsCompactProfile{});
   FakeLlamaContextOps ops(/*ctxSize=*/300);

@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.23.0] - 2026-06-02
+
+### Added
+
+- Continuous-batching support: `run()` now accepts an array of prompts and decodes them concurrently in a single native batch. Each request streams independently and resolves in the original submission order. Per-request generation params and explicit ids are supported via `BatchPrompt` wrappers.
+- `avgConcurrentSeq` runtime stat reporting the average number of sequences decoded together during a request.
+
+### Fixed
+
+- Token-budget stop (`n_predict`) no longer fires on the single-prompt decode path, where the generation loop already caps output. The guard was consuming an extra eval cycle and breaking C++ unit tests.
+
+## Pull Requests
+
+- [#2327](https://github.com/tetherto/qvac/pull/2327) - QVAC-18395: Continuous Batching (single-job)
+
 ## [0.22.1] - 2026-05-26
 
 ### Changed

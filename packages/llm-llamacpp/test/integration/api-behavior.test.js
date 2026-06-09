@@ -141,6 +141,22 @@ safeTest('idle | run batch: returns ids, keyed chunks, ordered results', { timeo
   t.ok(toNumber(response?.stats?.avgConcurrentSeq) > 1.1, 'batch stats report concurrent sequence decoding')
 })
 
+safeTest('idle | run batch without parallel >= 2: rejects before admission', { timeout: 600_000 }, async t => {
+  // Default load (parallel = 1) leaves continuous batching inactive, so batch
+  // input must be rejected up front rather than reaching the worker thread.
+  const { model } = await setupModel(t)
+  const batchPrompts = [
+    [{ role: 'user', content: 'Say red.' }],
+    [{ role: 'user', content: 'Say blue.' }]
+  ]
+
+  await t.exception.all(
+    () => model.run(batchPrompts),
+    /parallel >= 2/,
+    'batch run rejects when the model was not loaded with parallel >= 2'
+  )
+})
+
 safeTest('idle | run with prefill: evaluates prompt without token generation', { timeout: 600_000 }, async t => {
   const { model } = await setupModel(t)
 

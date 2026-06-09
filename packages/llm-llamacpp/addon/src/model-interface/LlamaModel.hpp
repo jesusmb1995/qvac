@@ -133,6 +133,10 @@ public:
   std::vector<std::string>
   processPromptBatch(const std::vector<Prompt>& prompts);
 
+  /// @brief True when the model was loaded with continuous batching active
+  /// (text-only context with `n_seq_max > 1`, i.e. `parallel >= 2`).
+  [[nodiscard]] bool supportsBatching() const;
+
   /**
    * The Reset method.
    */

@@ -4,9 +4,9 @@
 #include <cassert>
 
 #include <common/log.h>
+#include <inference-addon-cpp/Errors.hpp>
 #include <llama/mtmd/mtmd-helper.h>
 #include <llama/mtmd/mtmd.h>
-#include <inference-addon-cpp/Errors.hpp>
 
 #include "ContextSlider.hpp"
 #include "GenerationParamsApply.hpp"
@@ -26,8 +26,8 @@ MtmdLlmContext::MtmdLlmContext(
     common_params& commonParams, common_init_result_ptr llamaInit,
     ToolsCompactController& tools)
     : tools_(tools), llamaInit_(std::move(llamaInit)), params_(commonParams) {
-  modelCtx_.model = llamaInit_.model.get();
-  modelCtx_.lctx = llamaInit_.context.get();
+  modelCtx_.model = llamaInit_->model();
+  modelCtx_.lctx = llamaInit_->context();
 
   if (modelCtx_.model == nullptr) {
     throw qvac_errors::StatusError(
@@ -45,7 +45,8 @@ MtmdLlmContext::MtmdLlmContext(
 
   modelCtx_.vocab = llama_model_get_vocab(modelCtx_.model);
 
-  std::string chatTemplate = getChatTemplate(modelCtx_.model, params_, tools_.enabled());
+  std::string chatTemplate =
+      getChatTemplate(modelCtx_.model, params_, tools_.enabled());
   tmpls_ = common_chat_templates_init(modelCtx_.model, chatTemplate);
 
   smpl_.reset(common_sampler_init(modelCtx_.model, params_.sampling));
@@ -93,7 +94,8 @@ MtmdLlmContext::MtmdLlmContext(
 
   // load antiprompt tokens for legacy templates
   if (params_.chat_template == "vicuna") {
-    auto tempTokens = common_tokenize(modelCtx_.lctx, "ASSISTANT:", false, true);
+    auto tempTokens =
+        common_tokenize(modelCtx_.lctx, "ASSISTANT:", false, true);
     antipromptTokens_.insert(
         antipromptTokens_.end(), tempTokens.begin(), tempTokens.end());
   } else if (params_.chat_template == "deepseek") {
@@ -106,7 +108,8 @@ MtmdLlmContext::MtmdLlmContext(
       qvac_lib_inference_addon_llama::utils::isHarmonyModel(modelCtx_.model);
   if (isHarmonyModel_) {
     harmonyCallToken_ =
-        qvac_lib_inference_addon_llama::utils::getHarmonyCallToken(modelCtx_.lctx);
+        qvac_lib_inference_addon_llama::utils::getHarmonyCallToken(
+            modelCtx_.lctx);
     if (harmonyCallToken_ == LLAMA_TOKEN_NULL) {
       isHarmonyModel_ = false;
     }
@@ -150,12 +153,15 @@ bool MtmdLlmContext::checkAntiprompt() {
     // casing variant the model might emit.
     std::string lastOutputLower = lastOutput;
     std::transform(
-        lastOutputLower.begin(), lastOutputLower.end(), lastOutputLower.begin(),
+        lastOutputLower.begin(),
+        lastOutputLower.end(),
+        lastOutputLower.begin(),
         [](unsigned char c) { return std::tolower(c); });
     for (const std::string& antiprompt : params_.antiprompt) {
       std::string antipromptLower = antiprompt;
       std::transform(
-          antipromptLower.begin(), antipromptLower.end(),
+          antipromptLower.begin(),
+          antipromptLower.end(),
           antipromptLower.begin(),
           [](unsigned char c) { return std::tolower(c); });
       if (lastOutputLower.find(antipromptLower) != std::string::npos) {
@@ -406,9 +412,8 @@ void MtmdLlmContext::flushPendingUtf8ToCallback(
 }
 
 void MtmdLlmContext::applyContextDiscard() {
-  auto outcome =
-      trySlideGeneration(
-          modelCtx_.lctx, seqId_, nPast_, firstMsgTokens_, nDiscarded_, tools_);
+  auto outcome = trySlideGeneration(
+      modelCtx_.lctx, seqId_, nPast_, firstMsgTokens_, nDiscarded_, tools_);
   if (outcome.kind == ContextSlideOutcome::Kind::Slid) {
     nPast_ = outcome.newNPast;
     ++nSlides_;
@@ -481,7 +486,8 @@ bool MtmdLlmContext::generateResponse(
     }
     applyContextDiscard();
 
-    llama_token tokenId = common_sampler_sample(smpl_.get(), modelCtx_.lctx, -1);
+    llama_token tokenId =
+        common_sampler_sample(smpl_.get(), modelCtx_.lctx, -1);
     common_sampler_accept(smpl_.get(), tokenId, true);
     --nRemain;
 
@@ -503,7 +509,8 @@ bool MtmdLlmContext::generateResponse(
           string_format(
               "[MtmdLlm] Harmony <|call|> stop: tokenId=%d\n", tokenId));
       if (outputCallback) {
-        std::string callMarker = common_token_to_piece(modelCtx_.lctx, tokenId, true);
+        std::string callMarker =
+            common_token_to_piece(modelCtx_.lctx, tokenId, true);
         if (!callMarker.empty()) {
           outputCallback(callMarker);
         }
@@ -540,7 +547,8 @@ bool MtmdLlmContext::generateResponse(
 
 std::function<void()>
 MtmdLlmContext::applyGenerationParams(const GenerationParams& overrides) {
-  return applyGenerationParamsToContext(params_, smpl_, modelCtx_.model, overrides);
+  return applyGenerationParamsToContext(
+      params_, smpl_, modelCtx_.model, overrides);
 }
 
 void MtmdLlmContext::stop() { stopGeneration_.store(true); }

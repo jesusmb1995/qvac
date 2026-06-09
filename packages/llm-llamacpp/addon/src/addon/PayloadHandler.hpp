@@ -4,10 +4,9 @@
 #include <memory>
 #include <string>
 
+#include <inference-addon-cpp/JsUtils.hpp>
+#include <inference-addon-cpp/queue/OutputQueue.hpp>
 #include <js.h>
-
-#include <qvac-lib-inference-addon-cpp/JsUtils.hpp>
-#include <qvac-lib-inference-addon-cpp/queue/OutputQueue.hpp>
 
 #include "addon/LlmErrors.hpp"
 
@@ -16,26 +15,12 @@ namespace qvac_lib_inference_addon_llama {
 namespace js = qvac_lib_inference_addon_cpp::js;
 
 /// Stateless helpers for pre-allocated JS streaming payloads, one per
-/// sequence id.
+/// sequence id. `type`/`id` are baked in at allocate time so the per-token
+/// path only mutates `output`, avoiding per-token object/string creation.
 ///
-/// Each entry carries the constant `type` and `id` properties baked in
-/// at allocation time; the per-token streaming path only mutates
-/// `output` and returns the same JS object every time, eliminating the
-/// per-token `js_create_object` + `type`/`id` `js_create_string_utf8`
-/// round-trips.
-///
-/// Operations work directly on the raw `js_ref_t*` handle threaded
-/// through the streaming closure into the consumer event struct, so the
-/// hot path is a single `js_get_reference_value` per token with zero
-/// container bookkeeping.
-///
-/// Lifetime is governed by the streaming protocol invariant that every
-/// admitted sequence fires `release()` exactly once (e.g. via the
-/// scheduler's per-slot `onDone` callback under
-/// `ContinuousBatchScheduler`, including its cancel / decode-error /
-/// scheduler-teardown paths).
-///
-/// All operations run on the JS thread, so no locking is required.
+/// Lifetime invariant: every admitted sequence fires `release()` exactly
+/// once (via the scheduler's per-slot `onDone`, including cancel /
+/// decode-error / teardown paths). All ops run on the JS thread; no locking.
 class PayloadHandler {
 public:
   /// Creates a payload object `{ type: TypeName, id }` and returns the
@@ -49,7 +34,8 @@ public:
     payload.setProperty(env, "type", js::String::create(env, TypeName));
     payload.setProperty(env, "id", js::String::create(env, id));
     js_ref_t* handle = nullptr;
-    if (js_create_reference(env, payload, 1, &handle) != 0 || handle == nullptr) {
+    if (js_create_reference(env, payload, 1, &handle) != 0 ||
+        handle == nullptr) {
       throw qvac_errors::StatusError(
           qvac_errors::general_error::InternalError,
           "PayloadHandler: js_create_reference failed");
@@ -76,12 +62,9 @@ public:
   }
 };
 
-/// One per-token streaming event. Carries the pre-allocated payload
-/// handle (resolved by `PayloadHandler::resolve`) instead of re-encoding
-/// the `id` on every call. `finished == true` is the explicit done
-/// signal driven by the scheduler's per-slot `onDone` callback; the JS
-/// handler then drops the corresponding payload via
-/// `PayloadHandler::release`.
+/// One per-token streaming event, carrying the pre-allocated payload handle
+/// instead of re-encoding `id` each call. `finished == true` is the done
+/// signal; the JS handler then calls `PayloadHandler::release`.
 struct BatchTokenOutput {
   js_ref_t* payloadHandle = nullptr;
   std::string output;

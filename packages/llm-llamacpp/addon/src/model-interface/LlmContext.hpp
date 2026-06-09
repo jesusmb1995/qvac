@@ -328,8 +328,8 @@ public:
 
 protected:
   void clearSequenceMemory(
-      llama_context* lctx, llama_pos startPos = -1, llama_pos endPos = -1)
-      const {
+      llama_context* lctx, llama_pos startPos = -1,
+      llama_pos endPos = -1) const {
     if (auto* mem = llama_get_memory(lctx); mem == nullptr) {
       throw qvac_errors::StatusError(
           ADDON_ID,

@@ -27,15 +27,9 @@ struct SequenceStepResult {
 /// in-flight sequence (KV-cache offset, sampler, antiprompt buffer, ...)
 /// and reacts to scheduler-driven lifecycle events.
 ///
-/// The interface is intentionally decoupled from `LlmContext`: the
-/// scheduler only sees the methods listed here, so adding a new
-/// `LlmContext` capability (e.g. media handling) does not pollute the
-/// scheduler's view of a sequence. The `TextLlmContext` concrete class
-/// implements both `LlmContext` (legacy single-prompt API) and
-/// `SequenceDriver` (continuous-batching API); the overlapping
-/// state-query methods (`getNPast`, `getNSlides`, `validatePromptPolicy`)
-/// are declared on both bases and a single override in `TextLlmContext`
-/// satisfies both vtables.
+/// Intentionally decoupled from `LlmContext` so a new `LlmContext`
+/// capability does not pollute the scheduler's view of a sequence.
+/// `TextLlmContext` implements both interfaces.
 ///
 /// Method ordering below mirrors a sequence's lifecycle:
 ///   `validatePromptPolicy` -> `loadCache` -> `preparePrefill`
@@ -51,10 +45,8 @@ public:
   SequenceDriver& operator=(SequenceDriver&&) = delete;
   virtual ~SequenceDriver() = default;
 
-  /// Number of tokens currently held in this sequence's KV cache.
   [[nodiscard]] virtual llama_pos getNPast() const = 0;
 
-  /// Number of context-overflow slides this sequence has performed.
   [[nodiscard]] virtual int32_t getNSlides() const = 0;
 
   /// Reject prompts that violate per-sequence admission policy (size,
@@ -75,8 +67,8 @@ public:
 
   /// Notify the driver that the scheduler has finished prefill-decoding
   /// `prefillTokenCount` tokens up to absolute position `currentPos`.
-  virtual void onPrefillComplete(
-      llama_pos currentPos, size_t prefillTokenCount) = 0;
+  virtual void
+  onPrefillComplete(llama_pos currentPos, size_t prefillTokenCount) = 0;
 
   /// Driven by the scheduler once `llama_decode` has produced logits for
   /// this sequence's last batch entry. Implementations sample the next
@@ -96,24 +88,20 @@ public:
   virtual void onSequenceEnd(
       const std::function<void(const std::string&)>& outputCallback) = 0;
 
-  /// Called when generation reaches a natural EOG / stop token (before
-  /// `onSequenceEnd`).
+  /// Fired when generation reaches a natural EOG / stop token.
   virtual void onGenerationFinished(
       const std::function<void(const std::string&)>& outputCallback) = 0;
 
-  /// Called when the sequence is cancelled (user-requested or fatal
-  /// error) before `onSequenceEnd`.
-  virtual void onCancel(
-      const std::function<void(const std::string&)>& outputCallback) = 0;
+  /// Fired when the sequence is cancelled (user-requested or fatal error).
+  virtual void
+  onCancel(const std::function<void(const std::string&)>& outputCallback) = 0;
 
   /// Try to populate this sequence's KV-cache from a previously
   /// persisted cache. Returns true when the cache was loaded
   /// successfully; the scheduler then skips the corresponding prefix
   /// tokens at admit time.
-  [[nodiscard]] virtual bool loadCache(
-      const std::string& cacheKey, llama_pos configuredNDiscarded) = 0;
+  [[nodiscard]] virtual bool
+  loadCache(const std::string& cacheKey, llama_pos configuredNDiscarded) = 0;
 
-  /// Persist this sequence's KV-cache under `cacheKey` at the end of the
-  /// run.
   virtual void saveCache(const std::string& cacheKey) const = 0;
 };

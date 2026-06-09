@@ -31,7 +31,8 @@ public:
       ToolsCompactController& tools);
   TextLlmContext(
       const common_params& commonParams, const LlmModelContext& shared,
-      ToolsCompactController& tools, llama_seq_id seqId);
+      ToolsCompactController& tools, llama_seq_id seqId,
+      llama_pos perSeqCtxCeiling = -1);
 
   // Destructor
   ~TextLlmContext() override = default;
@@ -131,6 +132,14 @@ public:
    */
   void setNDiscarded(llama_pos nDiscarded) override;
 
+  /**
+   * The get n_discarded method. It returns the configured context-shift
+   * discard budget. A value of 0 means context shifting is disabled.
+   *
+   * @return - the number of tokens to discard on overflow.
+   */
+  [[nodiscard]] llama_pos getNDiscarded() const;
+
   [[nodiscard]] int32_t getNSlides() const override;
   void resetNSlides() override;
 
@@ -156,8 +165,8 @@ public:
       const std::vector<common_chat_tool>& tools, bool isCacheLoaded,
       bool prefill) override;
 
-  void onPrefillComplete(
-      llama_pos currentPos, size_t prefillTokenCount) override;
+  void
+  onPrefillComplete(llama_pos currentPos, size_t prefillTokenCount) override;
 
   SequenceStepResult onLogitsReady(
       int logitIdx, unsigned generatedAfterAccept,
@@ -219,6 +228,7 @@ private:
       const std::string& text);
   void initializeCommonState();
   void initializeOwnedThreadpools();
+  [[nodiscard]] llama_pos ctxCeiling() const;
   void applyContextDiscard();
   void handleStopRequestAndAddEot(LlamaBatch& batch);
 
@@ -235,6 +245,7 @@ private:
   llama_pos nPast_ = 0;
   llama_pos nDiscarded_ = 0;
   llama_pos firstMsgTokens_ = 0;
+  llama_pos perSeqCtxCeiling_ = -1;
   int32_t nSlides_ = 0;
   bool pendingBatchFirstMsg_ = false;
   bool generationStarted_ = false;

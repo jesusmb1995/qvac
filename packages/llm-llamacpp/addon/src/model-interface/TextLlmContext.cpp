@@ -7,8 +7,8 @@
 #include <filesystem>
 #include <system_error>
 
-#include <llama.h>
 #include <inference-addon-cpp/Errors.hpp>
+#include <llama.h>
 
 #include "ContextSlider.hpp"
 #include "GenerationParamsApply.hpp"
@@ -42,18 +42,26 @@ TextLlmContext::TextLlmContext(
     common_params& commonParams, common_init_result_ptr llamaInit,
     ToolsCompactController& tools)
     : tools_(tools), llamaInit_(std::move(llamaInit)), params_(commonParams) {
-  modelCtx_.model = llamaInit_.model.get();
-  modelCtx_.lctx = llamaInit_.context.get();
+  modelCtx_.model = llamaInit_->model();
+  modelCtx_.lctx = llamaInit_->context();
   initializeCommonState();
   initializeOwnedThreadpools();
 }
 
 TextLlmContext::TextLlmContext(
     const common_params& commonParams, const LlmModelContext& shared,
-    ToolsCompactController& tools, llama_seq_id seqId)
-    : tools_(tools), modelCtx_(shared), params_(commonParams) {
+    ToolsCompactController& tools, llama_seq_id seqId,
+    llama_pos perSeqCtxCeiling)
+    : tools_(tools), modelCtx_(shared), params_(commonParams),
+      perSeqCtxCeiling_(perSeqCtxCeiling) {
   seqId_ = seqId;
   initializeCommonState();
+}
+
+llama_pos TextLlmContext::ctxCeiling() const {
+  return perSeqCtxCeiling_ > 0
+             ? perSeqCtxCeiling_
+             : static_cast<llama_pos>(llama_n_ctx(modelCtx_.lctx));
 }
 
 void TextLlmContext::initializeCommonState() {
@@ -71,7 +79,8 @@ void TextLlmContext::initializeCommonState() {
     modelCtx_.vocab = llama_model_get_vocab(modelCtx_.model);
   }
 
-  isQwen3Model_ = qvac_lib_inference_addon_llama::utils::isQwen3Model(modelCtx_.model);
+  isQwen3Model_ =
+      qvac_lib_inference_addon_llama::utils::isQwen3Model(modelCtx_.model);
   if (isQwen3Model_) {
     qvac_lib_inference_addon_llama::utils::initializeQwen3ReasoningState(
         modelCtx_.lctx, reasoningState_);
@@ -81,7 +90,8 @@ void TextLlmContext::initializeCommonState() {
       qvac_lib_inference_addon_llama::utils::isHarmonyModel(modelCtx_.model);
   if (isHarmonyModel_) {
     harmonyCallToken_ =
-        qvac_lib_inference_addon_llama::utils::getHarmonyCallToken(modelCtx_.lctx);
+        qvac_lib_inference_addon_llama::utils::getHarmonyCallToken(
+            modelCtx_.lctx);
     if (harmonyCallToken_ == LLAMA_TOKEN_NULL) {
       isHarmonyModel_ = false;
     }
@@ -107,7 +117,8 @@ void TextLlmContext::initializeCommonState() {
         ADDON_ID, toString(UnableToCreateSamplingSystem), errorMsg);
   }
 
-  if (!llama_model_has_encoder(modelCtx_.model) && llama_vocab_get_add_eos(modelCtx_.vocab)) {
+  if (!llama_model_has_encoder(modelCtx_.model) &&
+      llama_vocab_get_add_eos(modelCtx_.vocab)) {
     throw qvac_errors::StatusError(
         ADDON_ID,
         qvac_errors::general_error::toString(
@@ -187,7 +198,8 @@ void TextLlmContext::initializeOwnedThreadpools() {
         toString(UnableToCreateThreadPool),
         "threadpool create failed");
   }
-  llama_attach_threadpool(modelCtx_.lctx, threadpool_.get(), threadpoolBatch_.get());
+  llama_attach_threadpool(
+      modelCtx_.lctx, threadpool_.get(), threadpoolBatch_.get());
 
   QLOG_IF(Priority::DEBUG, [&]() {
     return string_format(
@@ -209,12 +221,15 @@ bool TextLlmContext::checkAntiprompt() {
     // casing variant the model might emit.
     std::string lastOutputLower = lastOutput;
     std::transform(
-        lastOutputLower.begin(), lastOutputLower.end(), lastOutputLower.begin(),
+        lastOutputLower.begin(),
+        lastOutputLower.end(),
+        lastOutputLower.begin(),
         [](unsigned char c) { return std::tolower(c); });
     for (const std::string& antiprompt : params_.antiprompt) {
       std::string antipromptLower = antiprompt;
       std::transform(
-          antipromptLower.begin(), antipromptLower.end(),
+          antipromptLower.begin(),
+          antipromptLower.end(),
           antipromptLower.begin(),
           [](unsigned char c) { return std::tolower(c); });
       if (lastOutputLower.find(antipromptLower) != std::string::npos) {
@@ -314,11 +329,13 @@ void TextLlmContext::tokenizeChat(
   }
 
   // Encode the input if model has encoder
-  if (llama_model_has_encoder(modelCtx_.model) && nPast_ == 0 && !isCacheLoaded) {
+  if (llama_model_has_encoder(modelCtx_.model) && nPast_ == 0 &&
+      !isCacheLoaded) {
     int encInputSize = static_cast<int>(inputTokens.size());
     llama_token* encInputBuf = inputTokens.data();
 
-    if (llama_encode(modelCtx_.lctx, llama_batch_get_one(encInputBuf, encInputSize)) !=
+    if (llama_encode(
+            modelCtx_.lctx, llama_batch_get_one(encInputBuf, encInputSize)) !=
         0) {
       std::string errorMsg =
           string_format("[TextLlm] %s : failed to eval encoder\n", __func__);
@@ -326,7 +343,8 @@ void TextLlmContext::tokenizeChat(
           ADDON_ID, toString(EncoderFailed), errorMsg);
     }
 
-    llama_token decoderStartTokenId = llama_model_decoder_start_token(modelCtx_.model);
+    llama_token decoderStartTokenId =
+        llama_model_decoder_start_token(modelCtx_.model);
     if (decoderStartTokenId == LLAMA_TOKEN_NULL) {
       decoderStartTokenId = llama_vocab_bos(modelCtx_.vocab);
     }
@@ -353,15 +371,14 @@ bool TextLlmContext::evalMessageWithTools(
 
   llama_pos count = nPast_;
   llama_pos tokenIndex = 0;
-  while (tokenIndex < nTokens) { // split into batches
-    if (stopGeneration_
-            .load()) { // remove the last added tokens from the context
+  while (tokenIndex < nTokens) {
+    if (stopGeneration_.load()) {
       removeLastNTokens(tokenIndex);
       stopGeneration_.store(false);
       pendingBatchFirstMsg_ = false;
       return false;
     }
-    textBatch->n_tokens = 0; // clear the batch
+    textBatch->n_tokens = 0;
     // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic,bugprone-narrowing-conversions,readability-implicit-bool-conversion,readability-identifier-naming)
     for (; tokenIndex < nTokens && textBatch->n_tokens < params_.n_batch;
          tokenIndex++) {
@@ -408,16 +425,22 @@ std::vector<llama_token> TextLlmContext::preparePrefill(
   const size_t nTokens = inputTokens.size();
   pendingBatchFirstMsg_ = nPast_ == 0;
 
-  if (nTokens >= llama_n_ctx(modelCtx_.lctx)) {
+  // Per-slot usable window: the partitioned per-sequence cap in batch mode,
+  // else the full context. Sliding/overflow must measure against this so a
+  // cached prompt larger than its slot can be discarded to fit instead of
+  // being rejected by the scheduler.
+  const llama_pos ceiling = ctxCeiling();
+
+  if (nTokens >= static_cast<size_t>(ceiling)) {
     std::string errorMsg = string_format(
         "[TextLlm] context overflow at batch prefill step: prompt tokens %ld, "
         "max context tokens %d\n",
         nTokens,
-        llama_n_ctx(modelCtx_.lctx));
+        ceiling);
     throw qvac_errors::StatusError(
         ADDON_ID, toString(ContextOverflow), errorMsg);
   }
-  if (nPast_ + nTokens >= llama_n_ctx(modelCtx_.lctx)) {
+  if (nPast_ + static_cast<llama_pos>(nTokens) >= ceiling) {
     auto outcome = trySlidePrefill(
         modelCtx_.lctx,
         seqId_,
@@ -425,7 +448,9 @@ std::vector<llama_token> TextLlmContext::preparePrefill(
         firstMsgTokens_,
         static_cast<llama_pos>(nTokens),
         nDiscarded_,
-        tools_);
+        tools_,
+        defaultContextSliderOps(),
+        ceiling);
     switch (outcome.kind) {
     case ContextSlideOutcome::Kind::Slid:
       nPast_ = outcome.newNPast;
@@ -452,7 +477,7 @@ std::vector<llama_token> TextLlmContext::preparePrefill(
           "[TextLlm] context overflow at batch prefill step (%ld tokens, max "
           "%d)\n",
           nPast_ + nTokens,
-          llama_n_ctx(modelCtx_.lctx));
+          ceiling);
       throw qvac_errors::StatusError(
           ADDON_ID, toString(ContextOverflow), errorMsg);
     }
@@ -469,14 +494,13 @@ void TextLlmContext::onPrefillComplete(
   nPast_ = currentPos;
   if (pendingBatchFirstMsg_) {
     firstMsgTokens_ = nPast_;
-    const auto ctxSize = static_cast<llama_pos>(llama_n_ctx(modelCtx_.lctx));
+    const llama_pos ctxSize = ctxCeiling();
     if (nDiscarded_ >= ctxSize - firstMsgTokens_) {
       nDiscarded_ = ctxSize - firstMsgTokens_ - 1;
     }
     pendingBatchFirstMsg_ = false;
   }
-  tools_.onEvalComplete(
-      nPast_, static_cast<llama_pos>(prefillTokenCount));
+  tools_.onEvalComplete(nPast_, static_cast<llama_pos>(prefillTokenCount));
 }
 
 void TextLlmContext::flushPendingUtf8ToCallback(
@@ -503,9 +527,15 @@ void TextLlmContext::emitOutputPiece(
 }
 
 void TextLlmContext::applyContextDiscard() {
-  auto outcome =
-      trySlideGeneration(
-          modelCtx_.lctx, seqId_, nPast_, firstMsgTokens_, nDiscarded_, tools_);
+  auto outcome = trySlideGeneration(
+      modelCtx_.lctx,
+      seqId_,
+      nPast_,
+      firstMsgTokens_,
+      nDiscarded_,
+      tools_,
+      defaultContextSliderOps(),
+      ctxCeiling());
   if (outcome.kind == ContextSlideOutcome::Kind::Slid) {
     nPast_ = outcome.newNPast;
     ++nSlides_;
@@ -609,13 +639,13 @@ SequenceStepResult TextLlmContext::onLogitsReady(
     flushPendingUtf8ToCallback(outputCallback);
     const llama_token eot = llama_vocab_eot(modelCtx_.vocab);
     return {
-        .token = eot == LLAMA_TOKEN_NULL ? llama_vocab_eos(modelCtx_.vocab) : eot,
+        .token =
+            eot == LLAMA_TOKEN_NULL ? llama_vocab_eos(modelCtx_.vocab) : eot,
         .finished = true};
   }
   generationStarted_ = true;
 
-  if (nPast_ + 1 > static_cast<llama_pos>(llama_n_ctx(modelCtx_.lctx)) &&
-      nDiscarded_ == 0) {
+  if (nPast_ + 1 > ctxCeiling() && nDiscarded_ == 0) {
     QLOG_IF(
         Priority::WARNING,
         string_format(
@@ -623,7 +653,7 @@ SequenceStepResult TextLlmContext::onLogitsReady(
             "is 0 (nPast=%d, nCtx=%d, firstMsgTokens=%d, nPastBeforeTools=%d, "
             "toolsCompact=%s)\n",
             nPast_,
-            llama_n_ctx(modelCtx_.lctx),
+            ctxCeiling(),
             firstMsgTokens_,
             tools_.anchor(),
             tools_.enabled() ? "true" : "false"));
@@ -660,10 +690,12 @@ SequenceStepResult TextLlmContext::onLogitsReady(
               tokenId, tokenStr, **inlineDecodeBatch, nPast_, outputCallback)) {
         return {.token = tokenId, .finished = false, .decodedInline = true};
       }
-    } else if (reasoningState_.inside_reasoning &&
-               reasoningState_.cached_close_tag_token != LLAMA_TOKEN_NULL) {
+    } else if (
+        reasoningState_.inside_reasoning &&
+        reasoningState_.cached_close_tag_token != LLAMA_TOKEN_NULL) {
       tokenId = reasoningState_.cached_close_tag_token;
-      tokenStr = common_token_to_piece(modelCtx_.lctx, tokenId, params_.special);
+      tokenStr =
+          common_token_to_piece(modelCtx_.lctx, tokenId, params_.special);
       reasoningState_.inside_reasoning = false;
       if (reasoningState_.cached_newline_token != LLAMA_TOKEN_NULL) {
         forcedTokens_.push_back(reasoningState_.cached_newline_token);
@@ -676,7 +708,10 @@ SequenceStepResult TextLlmContext::onLogitsReady(
       return {.token = tokenId, .finished = false};
     }
   }
-  const bool reachedBudget = params_.n_predict > 0 &&
+  // Batch path only: scheduler stops solely on `finished`. Single-prompt's
+  // own while-loop caps generation; firing here drops its n_eval by one.
+  const bool reachedBudget =
+      inlineDecodeBatch == nullptr && params_.n_predict > 0 &&
       generatedAfterAccept >= static_cast<unsigned>(params_.n_predict);
   if (isEos && isHarmonyModel_ && params_.use_jinja &&
       tokenId == harmonyCallToken_) {
@@ -684,12 +719,13 @@ SequenceStepResult TextLlmContext::onLogitsReady(
         Priority::DEBUG,
         string_format(
             "[TextLlm] Harmony <|call|> stop: tokenId=%d\n", tokenId));
-    const std::string callMarker = common_token_to_piece(modelCtx_.lctx, tokenId, true);
+    const std::string callMarker =
+        common_token_to_piece(modelCtx_.lctx, tokenId, true);
     emitOutputPiece(outputCallback, callMarker);
     flushPendingUtf8ToCallback(outputCallback);
     return {.token = tokenId, .finished = true};
   }
-  const bool finished = reachedBudget || isEos || checkAntiprompt();
+  const bool finished = isEos || reachedBudget || checkAntiprompt();
   if (finished) {
     flushPendingUtf8ToCallback(outputCallback);
   }
@@ -738,6 +774,7 @@ void TextLlmContext::onGenerationCompletePolicy(
 
 bool TextLlmContext::loadCache(
     const std::string& cacheKey, llama_pos configuredNDiscarded) {
+  nDiscarded_ = configuredNDiscarded;
   if (cacheKey.empty() || !isFileInitialized(cacheKey)) {
     return false;
   }
@@ -745,18 +782,12 @@ bool TextLlmContext::loadCache(
   size_t tokenCount = 0;
   llama_token sessionTokens[2] = {0, 0};
   const auto loadedBytes = llama_state_seq_load_file(
-      modelCtx_.lctx,
-      cacheKey.c_str(),
-      seqId_,
-      sessionTokens,
-      2,
-      &tokenCount);
+      modelCtx_.lctx, cacheKey.c_str(), seqId_, sessionTokens, 2, &tokenCount);
   if (loadedBytes == 0) {
     throw qvac_errors::StatusError(
         ADDON_ID,
         toString(UnableToLoadSessionFile),
-        "TextLlmContext::loadCache: failed to load cache '" +
-            cacheKey + "'");
+        "TextLlmContext::loadCache: failed to load cache '" + cacheKey + "'");
   }
 
   if (tokenCount <= 1) {
@@ -772,8 +803,11 @@ bool TextLlmContext::loadCache(
 
   nPast_ = sessionTokens[0];
   firstMsgTokens_ = sessionTokens[1];
-  if (configuredNDiscarded > llama_n_ctx(modelCtx_.lctx) - firstMsgTokens_) {
-    nDiscarded_ = llama_n_ctx(modelCtx_.lctx) - firstMsgTokens_ - 1;
+  // Clamp discard to the per-slot window (ctxCeiling), not the physical
+  // context: in batch mode the slot ceiling is ctx / n_parallel.
+  const llama_pos window = ctxCeiling();
+  if (configuredNDiscarded > window - firstMsgTokens_) {
+    nDiscarded_ = window - firstMsgTokens_ - 1;
   } else {
     nDiscarded_ = configuredNDiscarded;
   }
@@ -798,14 +832,14 @@ void TextLlmContext::saveCache(const std::string& cacheKey) const {
     throw qvac_errors::StatusError(
         ADDON_ID,
         toString(InvalidInputFormat),
-        "TextLlmContext::saveCache: failed to save cache '" +
-            cacheKey + "'");
+        "TextLlmContext::saveCache: failed to save cache '" + cacheKey + "'");
   }
 }
 
 std::function<void()>
 TextLlmContext::applyGenerationParams(const GenerationParams& overrides) {
-  return applyGenerationParamsToContext(params_, smpl_, modelCtx_.model, overrides);
+  return applyGenerationParamsToContext(
+      params_, smpl_, modelCtx_.model, overrides);
 }
 
 void TextLlmContext::stop() { stopGeneration_.store(true); }
@@ -861,6 +895,8 @@ void TextLlmContext::setFirstMsgTokens(llama_pos firstMsgTokens) {
 void TextLlmContext::setNDiscarded(llama_pos nDiscarded) {
   this->nDiscarded_ = nDiscarded;
 }
+
+llama_pos TextLlmContext::getNDiscarded() const { return nDiscarded_; }
 
 int32_t TextLlmContext::getNSlides() const { return nSlides_; }
 void TextLlmContext::resetNSlides() { nSlides_ = 0; }
@@ -941,7 +977,9 @@ bool TextLlmContext::handleQwen3ReasoningEOS(
       }
 
       std::string newlineStr = common_token_to_piece(
-          modelCtx_.lctx, reasoningState_.cached_newline_token, params_.special);
+          modelCtx_.lctx,
+          reasoningState_.cached_newline_token,
+          params_.special);
       std::string completeChars = utf8Buffer_.addToken(newlineStr);
       if (!completeChars.empty()) {
         emitOutputPiece(outputCallback, completeChars);

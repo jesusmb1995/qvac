@@ -3,21 +3,25 @@
 #include <chrono>
 #include <exception>
 #include <optional>
+#include <ranges>
 #include <stdexcept>
 #include <thread>
 #include <utility>
 
 #include <common/common.h>
+#include <inference-addon-cpp/Errors.hpp>
 #include <llama.h>
-#include <qvac-lib-inference-addon-cpp/Errors.hpp>
 
 #include "GenerationParamsApply.hpp"
 #include "TextLlmContext.hpp"
 #include "addon/LlmErrors.hpp"
+#include "inference-addon-cpp/Logger.hpp"
+#include "utils/LoggingMacros.hpp"
 
 namespace qvac_lib_inference_addon_llama::batching {
 
 using qvac_lib_inference_addon_llama::errors::ADDON_ID;
+using namespace qvac_lib_inference_addon_cpp::logger;
 
 namespace {
 
@@ -36,15 +40,25 @@ unsigned perSeqCeiling(unsigned ctxTotalTokens, size_t batchSize) {
 
 } // namespace
 
+void finalizeTerminalDriver(
+    SequenceDriver& driver, StopReason reason, bool prefillOnly,
+    const std::function<void(const std::string&)>& outputCallback) {
+  if (reason == StopReason::Cancelled || reason == StopReason::DecodeError) {
+    driver.onCancel(outputCallback);
+  } else if (prefillOnly) {
+    driver.onSequenceEnd(outputCallback);
+  } else {
+    driver.onGenerationFinished(outputCallback);
+  }
+}
+
 ContinuousBatchScheduler::ContinuousBatchScheduler(
     LlmModelContext shared, unsigned maxChunkSize, unsigned ctxTotalTokens,
     size_t batchSize, int32_t batchCapacity, const common_params& baseParams,
     llama_pos configuredNDiscarded,
     std::optional<ToolsCompactProfile> toolsCompactProfile)
-    : shared_(shared),
-      baseSampling_(baseParams.sampling),
-      baseNPredict_(baseParams.n_predict),
-      baseParams_(baseParams),
+    : shared_(shared), baseSampling_(baseParams.sampling),
+      baseNPredict_(baseParams.n_predict), baseParams_(baseParams),
       configuredNDiscarded_(configuredNDiscarded),
       toolsCompactProfile_(std::move(toolsCompactProfile)),
       perSeqMaxTokens_(perSeqCeiling(ctxTotalTokens, batchSize)),
@@ -68,6 +82,16 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(
     throw std::invalid_argument(
         "ContinuousBatchScheduler: ctxTotalTokens / batchSize underflowed "
         "to 0; reduce batchSize or grow n_ctx");
+  }
+  if (configuredNDiscarded_ >= static_cast<llama_pos>(perSeqMaxTokens_)) {
+    QLOG_IF(
+        Priority::WARNING,
+        string_format(
+            "[ContinuousBatchScheduler] n_discarded=%d >= per-sequence cap "
+            "%u (ctxTotalTokens / n_parallel); it will be clamped below the "
+            "per-slot window. Lower n_discarded or grow n_ctx / n_parallel.\n",
+            configuredNDiscarded_,
+            perSeqMaxTokens_));
   }
 }
 
@@ -99,8 +123,11 @@ ContinuousBatchScheduler::processBatch(std::vector<SubmitRequest>&& requests) {
   }
   ensureWorkerStartedLocked();
   for (size_t i = 0; i < requests.size(); i++) {
-    pending_.enqueue(QueuedRequest{
-        .request = std::move(requests[i]), .group = group, .outputIndex = i});
+    pending_.enqueue(
+        QueuedRequest{
+            .request = std::move(requests[i]),
+            .group = group,
+            .outputIndex = i});
   }
   workCv_.notify_all();
   workCv_.wait(lock, [&group] { return group->done; });
@@ -161,7 +188,16 @@ void ContinuousBatchScheduler::workerLoop() {
       clearLocked();
       cancelRequested_.store(false);
     }
-    admitPendingIntoFreeSlotsLocked();
+    // A cancel-all observed during the step above already finished the
+    // active slots (stepLocked marks them Cancelled). It must NOT be
+    // followed by admitting `pending_`: those queued prompts belong to the
+    // cancelled work and would otherwise start running post-cancel. Drain
+    // them here instead so cancel-all atomically covers active + queued.
+    if (cancelRequested_.exchange(false)) {
+      cancelPendingLocked();
+    } else {
+      admitPendingIntoFreeSlotsLocked();
+    }
   }
   cancelPendingLocked();
   clearLocked();
@@ -187,17 +223,11 @@ void ContinuousBatchScheduler::admitPendingIntoFreeSlotsLocked() {
 
 uint32_t ContinuousBatchScheduler::submitLocked(QueuedRequest&& queued) {
   SubmitRequest& request = queued.request;
-  // Resolve per-request sampling/cap from base + overrides without
-  // touching context state. Drive a *local* `common_params` and an
-  // empty `CommonSamplerPtr` through `applyGenerationParamsToContext`
-  // to reuse its atomic-commit + validation logic as-is.
-  //
-  // The returned restore lambda is intentionally discarded: it only
-  // captures `&tmpParams` and `&overrideSampler` (both about to go out
-  // of scope) plus by-value snapshots of the baseline. `std::function`
-  // destruction *does not* invoke the body, only destroys captures —
-  // so dropping the lambda is safe. It must NOT be called outside this
-  // block: the references it captures would dangle.
+  // Resolve per-request sampling/cap on a *local* common_params, reusing
+  // applyGenerationParamsToContext's validation without touching context
+  // state. Its restore lambda is discarded: destroying a std::function only
+  // drops captures (never runs the body), so this is safe — but the lambda
+  // must NOT be called here, as its captured references would dangle.
   common_params tmpParams = baseParams_;
   tmpParams.sampling = baseSampling_;
   tmpParams.n_predict = baseNPredict_;
@@ -211,16 +241,10 @@ uint32_t ContinuousBatchScheduler::submitLocked(QueuedRequest&& queued) {
         tmpParams, overrideSampler, shared_.model, request.overrides);
   }
 
-  // `n_predict` is a per-request *generation budget* (max tokens to
-  // emit, llama.cpp's common_params semantics) — it lives entirely in
-  // the scheduler's per-slot state. The batcher only knows about its
-  // ctor-level `maxTokensPerSequence` ceiling, which still guards the
-  // KV pool. `<=0` means "no scheduler-level cap, batcher ceiling wins".
-  //
-  // The per-seq cap is a hard invariant of the partitioned KV pool, not
-  // a hint: silently clamping would let callers ask for 10k tokens and
-  // get 50, which is a footgun. Same policy as the prompt-size check
-  // below — overrun is an admit-time error, not a soft truncation.
+  // n_predict is the per-request generation budget; `<=0` means "no
+  // scheduler cap, batcher's maxTokensPerSequence ceiling wins". That
+  // ceiling is a hard invariant of the partitioned KV pool: an overrun is
+  // an admit-time error (below), never a silent clamp.
   const auto maybeSeqId = batcher_.firstFreeSeqId();
   if (!maybeSeqId.has_value()) {
     throw qvac_errors::StatusError(
@@ -230,13 +254,16 @@ uint32_t ContinuousBatchScheduler::submitLocked(QueuedRequest&& queued) {
         "ContinuousBatchScheduler::submit: failed to add to batch "
         "(MultiRequestBatcher::AddStatus=" +
             std::to_string(
-                static_cast<int>(MultiRequestBatcher::AddStatus::ErrNoFreeSlot)) +
+                static_cast<int>(
+                    MultiRequestBatcher::AddStatus::ErrNoFreeSlot)) +
             ")");
   }
   const uint32_t seqId = *maybeSeqId;
   auto tools = std::make_unique<ToolsCompactController>(toolsCompactProfile_);
   std::unique_ptr<SequenceDriver> driver =
-      std::make_unique<TextLlmContext>(tmpParams, shared_, *tools, seqId);
+      std::make_unique<TextLlmContext>(
+          tmpParams, shared_, *tools, seqId,
+          static_cast<llama_pos>(perSeqMaxTokens_));
   const bool isCacheLoaded =
       driver->loadCache(request.cacheKey, configuredNDiscarded_);
   const bool hasKvCacheContext = isCacheLoaded || driver->getNPast() > 0;
@@ -245,17 +272,18 @@ uint32_t ContinuousBatchScheduler::submitLocked(QueuedRequest&& queued) {
   auto tokens = driver->preparePrefill(
       request.chatMsgs, request.tools, isCacheLoaded, request.prefill);
 
-  const auto promptSize =
-      static_cast<unsigned>(driver->getNPast()) +
-      static_cast<unsigned>(tokens.size());
+  const auto promptSize = static_cast<unsigned>(driver->getNPast()) +
+                          static_cast<unsigned>(tokens.size());
   if (!request.prefill && promptSize >= perSeqMaxTokens_) {
     throw qvac_errors::StatusError(
         ADDON_ID,
         qvac_errors::general_error::toString(
             qvac_errors::general_error::InvalidArgument),
         "ContinuousBatchScheduler::submit: prompt of " +
-            std::to_string(promptSize) + " tokens leaves no room under "
-            "per-sequence cap " + std::to_string(perSeqMaxTokens_) +
+            std::to_string(promptSize) +
+            " tokens leaves no room under "
+            "per-sequence cap " +
+            std::to_string(perSeqMaxTokens_) +
             " (ctxTotalTokens / n_parallel)");
   }
   if (request.prefill && promptSize > perSeqMaxTokens_) {
@@ -277,8 +305,7 @@ uint32_t ContinuousBatchScheduler::submitLocked(QueuedRequest&& queued) {
             qvac_errors::general_error::InvalidArgument),
         "ContinuousBatchScheduler::submit: n_predict " +
             std::to_string(tmpParams.n_predict) + " + prompt " +
-            std::to_string(promptSize) +
-            " exceeds per-sequence cap " +
+            std::to_string(promptSize) + " exceeds per-sequence cap " +
             std::to_string(perSeqMaxTokens_) +
             " (ctxTotalTokens / n_parallel)");
   }
@@ -295,21 +322,61 @@ uint32_t ContinuousBatchScheduler::submitLocked(QueuedRequest&& queued) {
         "(MultiRequestBatcher::AddStatus=" +
             std::to_string(static_cast<int>(status)) + ")");
   }
-  slots_[seqId].emplace(SlotState{
-      .streams = std::move(streamsLocal),
-      .tools = std::move(tools),
-      .driver = std::move(driver),
-      .cacheKey = std::move(request.cacheKey),
-      .group = std::move(queued.group),
-      .outputIndex = queued.outputIndex,
-      .saveCacheToDisk = request.saveCacheToDisk,
-      .prefillOnly = request.prefill});
+  slots_[seqId].emplace(
+      SlotState{
+          .streams = std::move(streamsLocal),
+          .tools = std::move(tools),
+          .driver = std::move(driver),
+          .cacheKey = std::move(request.cacheKey),
+          .group = std::move(queued.group),
+          .outputIndex = queued.outputIndex,
+          .saveCacheToDisk = request.saveCacheToDisk,
+          .prefillOnly = request.prefill});
   return seqId;
 }
 
 bool ContinuousBatchScheduler::step() {
   std::unique_lock lock(mutex_);
   return stepLocked(&lock);
+}
+
+std::function<bool(const Request&)> ContinuousBatchScheduler::hasValidDriverF()
+    const {
+  return [this](const Request& req) {
+    return slots_[req.seqId].has_value() && slots_[req.seqId]->driver;
+  };
+}
+
+std::function<void(const std::string&)>
+ContinuousBatchScheduler::getOutputCallback(SlotState& slot, uint32_t seqId) {
+  return [&slot, seqId](const std::string& text) {
+    if (slot.group) {
+      slot.group->outputs[slot.outputIndex] += text;
+    }
+    if (slot.streams.onToken) {
+      slot.streams.onToken(seqId, text);
+    }
+  };
+}
+
+void ContinuousBatchScheduler::finalizeFinishedSequences() {
+  auto kvClear = [this](uint32_t seqId) {
+    llama_memory_t mem = llama_get_memory(shared_.lctx);
+    if (mem != nullptr) {
+      llama_memory_seq_rm(mem, static_cast<llama_seq_id>(seqId), -1, -1);
+    }
+  };
+  auto finished = batcher_.extractFinished();
+  for (const auto& req : finished) {
+    if (hasValidDriverF()(req)) {
+      auto& slot = *slots_[req.seqId];
+      finalizeTerminalDriver(
+          *slot.driver, req.stopReason, slot.prefillOnly, {});
+    }
+    kvClear(req.seqId);
+    notifyDone(req.seqId);
+    freeSlot(req.seqId);
+  }
 }
 
 bool ContinuousBatchScheduler::stepLocked(std::unique_lock<std::mutex>* lock) {
@@ -321,35 +388,30 @@ bool ContinuousBatchScheduler::stepLocked(std::unique_lock<std::mutex>* lock) {
   if (lock != nullptr) {
     lock->unlock();
   }
+  const auto decodeStart = std::chrono::steady_clock::now();
   const int decodeRc = llama_decode(shared_.lctx, *batch_);
+  const auto decodeDuration = std::chrono::steady_clock::now() - decodeStart;
   if (lock != nullptr) {
     lock->lock();
   }
 
   if (decodeRc != 0) {
     batcher_.markAllFinished(StopReason::DecodeError);
-    auto kvClear = [this](uint32_t seqId) {
-      llama_memory_t mem = llama_get_memory(shared_.lctx);
-      if (mem != nullptr) {
-        llama_memory_seq_rm(mem, static_cast<llama_seq_id>(seqId), -1, -1);
-      }
-    };
-    auto finished = batcher_.extractFinished(kvClear);
-    for (const auto& req : finished) {
-      if (slots_[req.seqId].has_value() && slots_[req.seqId]->driver) {
-        slots_[req.seqId]->driver->onSequenceEnd({});
-      }
-      notifyDone(req.seqId);
-      freeSlot(req.seqId);
-    }
+    finalizeFinishedSequences();
     return false;
   }
-  stats_.recordDecodeStep(fillResult.numActiveSequences);
+  const unsigned numGenerating =
+      fillResult.numActiveSequences - fillResult.numPrefillingSequences;
+  const unsigned prefillTokens =
+      fillResult.chunkSize * fillResult.numPrefillingSequences;
+  const unsigned decodeTokens = fillResult.chunkSize * numGenerating;
+  stats_.recordDecodeStep(
+      fillResult.numActiveSequences, prefillTokens, decodeTokens,
+      std::chrono::duration_cast<std::chrono::nanoseconds>(decodeDuration));
 
   batcher_.advance(
       fillResult.chunkSize,
-      [this](
-          uint32_t seqId, llama_pos currentPos, size_t prefillTokenCount) {
+      [this](uint32_t seqId, llama_pos currentPos, size_t prefillTokenCount) {
         auto& slot = slots_[seqId];
         if (!slot.has_value() || !slot->driver) {
           throw qvac_errors::StatusError(
@@ -389,9 +451,8 @@ bool ContinuousBatchScheduler::stepLocked(std::unique_lock<std::mutex>* lock) {
           slot->streams.onToken(seqId, text);
         }
       };
-      const SequenceStepResult result =
-          slot->driver->onLogitsReady(
-              logitIdx, generatedAfterAccept, outputCallback);
+      const SequenceStepResult result = slot->driver->onLogitsReady(
+          logitIdx, generatedAfterAccept, outputCallback);
       if (result.contextOverflow) {
         throw qvac_errors::StatusError(
             ADDON_ID,
@@ -407,7 +468,10 @@ bool ContinuousBatchScheduler::stepLocked(std::unique_lock<std::mutex>* lock) {
     });
   }
 
-  if (cancelRequested_.exchange(false)) {
+  // Cancel the active slots in-step (so onCancel/saveCache run promptly) but
+  // leave the flag set: workerLoop consumes it after the step to also drain
+  // any queued prompts in `pending_`, keeping cancel-all atomic.
+  if (cancelRequested_.load()) {
     batcher_.markAllFinished(StopReason::Cancelled);
   }
 
@@ -418,27 +482,16 @@ bool ContinuousBatchScheduler::stepLocked(std::unique_lock<std::mutex>* lock) {
     }
   };
   auto finished = batcher_.extractFinished();
+  for (const auto& req : finished
+       | std::views::filter(hasValidDriverF())) {
+    auto& slot = *slots_[req.seqId];
+    auto outputCallback = getOutputCallback(slot, req.seqId);
+    finalizeTerminalDriver(
+        *slot.driver, req.stopReason, slot.prefillOnly, outputCallback);
+    accumulateSlotRuntimeStats(slot, req);
+    saveCacheForSlot(req.seqId, *slots_[req.seqId]);
+  }
   for (const auto& req : finished) {
-    if (slots_[req.seqId].has_value() && slots_[req.seqId]->driver) {
-      auto& slot = *slots_[req.seqId];
-      auto outputCallback = [&slot, seqId = req.seqId](const std::string& text) {
-        if (slot.group) {
-          slot.group->outputs[slot.outputIndex] += text;
-        }
-        if (slot.streams.onToken) {
-          slot.streams.onToken(seqId, text);
-        }
-      };
-      if (req.stopReason == StopReason::Cancelled) {
-        slot.driver->onCancel(outputCallback);
-      } else if (slot.prefillOnly) {
-        slot.driver->onSequenceEnd(outputCallback);
-      } else {
-        slot.driver->onGenerationFinished(outputCallback);
-      }
-      accumulateSlotRuntimeStats(slot, req);
-      saveCacheForSlot(req.seqId, *slots_[req.seqId]);
-    }
     kvClear(req.seqId);
     notifyDone(req.seqId);
     freeSlot(req.seqId);
@@ -483,9 +536,20 @@ RuntimeStatsSnapshot ContinuousBatchScheduler::runtimeStats() const {
 
 void RuntimeStatsSnapshot::reset() { *this = RuntimeStatsSnapshot{}; }
 
-void RuntimeStatsSnapshot::recordDecodeStep(uint64_t numActiveSequences) {
+void RuntimeStatsSnapshot::recordDecodeStep(
+    uint64_t numActiveSequences, uint64_t prefillTokens, uint64_t decodeTokens,
+    std::chrono::nanoseconds stepDuration) {
   decodeStepCount_++;
   concurrentSeqSum_ += numActiveSequences;
+  const double stepMs =
+      std::chrono::duration<double, std::milli>(stepDuration).count();
+  if (decodeTokens > 0) {
+    decodeTimeMs_ += stepMs;
+    decodeTokenCount_ += decodeTokens;
+  } else {
+    prefillTimeMs_ += stepMs;
+    prefillTokenCount_ += prefillTokens;
+  }
 }
 
 void RuntimeStatsSnapshot::accumulateSlot(
@@ -497,15 +561,30 @@ void RuntimeStatsSnapshot::accumulateSlot(
 }
 
 double RuntimeStatsSnapshot::avgConcurrentSeq() const {
-  return decodeStepCount_ > 0
-             ? static_cast<double>(concurrentSeqSum_) /
-                   static_cast<double>(decodeStepCount_)
-             : 0.0;
+  return decodeStepCount_ > 0 ? static_cast<double>(concurrentSeqSum_) /
+                                    static_cast<double>(decodeStepCount_)
+                              : 0.0;
 }
 
 double RuntimeStatsSnapshot::elapsedMs() const {
   const auto elapsed = std::chrono::steady_clock::now() - start_;
   return std::chrono::duration<double, std::milli>(elapsed).count();
+}
+
+double RuntimeStatsSnapshot::decodeTokensPerSecond() const {
+  constexpr double kMillisInSecond = 1000.0;
+  return decodeTimeMs_ > 0.0
+             ? kMillisInSecond * static_cast<double>(decodeTokenCount_) /
+                   decodeTimeMs_
+             : 0.0;
+}
+
+double RuntimeStatsSnapshot::prefillTokensPerSecond() const {
+  constexpr double kMillisInSecond = 1000.0;
+  return prefillTimeMs_ > 0.0
+             ? kMillisInSecond * static_cast<double>(prefillTokenCount_) /
+                   prefillTimeMs_
+             : 0.0;
 }
 
 bool ContinuousBatchScheduler::cancel(uint32_t seqId) {
@@ -608,9 +687,25 @@ void ContinuousBatchScheduler::failGroupLocked(
 }
 
 void ContinuousBatchScheduler::cancelPendingLocked() {
+  // A queued request that is drained here never reached a slot, so it
+  // produced no output at all. Unlike an in-flight slot (cancelled
+  // gracefully with whatever it generated so far), this prompt had no
+  // chance to run, so surface it as an explicit `Cancelled` error rather
+  // than a silently-successful empty output.
   QueuedRequest queued;
   while (pending_.try_dequeue(queued)) {
-    completeGroupRequestLocked(queued.group);
+    if (queued.group) {
+      failGroupLocked(
+          queued.group,
+          std::make_exception_ptr(
+              qvac_errors::StatusError(
+                  ADDON_ID,
+                  qvac_lib_inference_addon_llama::errors::toString(
+                      qvac_lib_inference_addon_llama::errors::Cancelled),
+                  "ContinuousBatchScheduler: request cancelled before it "
+                  "could run (queued behind the parallel limit when cancel "
+                  "was requested)")));
+    }
   }
 }
 

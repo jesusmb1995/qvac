@@ -24,6 +24,15 @@
 
 namespace qvac_lib_inference_addon_llama::batching {
 
+/// Fire the terminal lifecycle hook for a finished sequence. A sequence that
+/// ran generation goes through onCancel (cancel/error) or onGenerationFinished
+/// (natural stop) so onGenerationCompletePolicy runs; a prefill-only slot only
+/// flushes via onSequenceEnd. One place for the mapping every terminal path
+/// shares (normal drain, cancel-all, decode-error finalization).
+void finalizeTerminalDriver(
+    SequenceDriver& driver, StopReason reason, bool prefillOnly,
+    const std::function<void(const std::string&)>& outputCallback);
+
 /// Per-request streaming sinks. Both are optional; missing callbacks
 /// are no-ops.
 struct StreamCallbacks {
@@ -31,7 +40,6 @@ struct StreamCallbacks {
   std::function<void(uint32_t seqId)> onDone;
 };
 
-/// One request admitted into the scheduler.
 struct SubmitRequest {
   std::vector<common_chat_msg> chatMsgs;
   std::vector<common_chat_tool> tools;
@@ -51,33 +59,44 @@ struct SubmitRequest {
   StreamCallbacks streams;
 };
 
-/// Aggregated per-scheduler runtime stats. Owns its own clock + decode-step
-/// counters internally and exposes the two derived metrics
-/// (`avgConcurrentSeq`, `elapsedMs`) as const getters so they are always
-/// computed from the live state rather than stored alongside it.
+/// Aggregated per-scheduler runtime stats. `avgConcurrentSeq`/`elapsedMs`
+/// are derived getters computed from live state, not stored.
 struct RuntimeStatsSnapshot {
   int64_t cacheTokens = 0;
   int64_t contextSlides = 0;
   int64_t generatedTokens = 0;
   int64_t promptTokens = 0;
 
-  /// Reset all counters and restart the elapsed-time clock.
   void reset();
 
-  /// Account for one completed `llama_decode` step that had
-  /// `numActiveSequences` slots feeding tokens.
-  void recordDecodeStep(uint64_t numActiveSequences);
+  /// Account for one `llama_decode` step of `stepDuration`. A step carrying
+  /// any decode token is charged wholly to decode; only pure-prefill steps
+  /// feed the prefill bucket, so prompt tokens piggybacking a decode step
+  /// never inflate the prefill rate.
+  void recordDecodeStep(
+      uint64_t numActiveSequences, uint64_t prefillTokens,
+      uint64_t decodeTokens, std::chrono::nanoseconds stepDuration);
 
-  /// Fold one completed slot's contribution (cache footprint, slides,
-  /// prompt/generated tokens) into the running totals.
+  /// Fold one completed slot's contribution into the running totals.
   void accumulateSlot(int64_t nPast, int64_t nSlides, const Request& req);
 
   [[nodiscard]] double avgConcurrentSeq() const;
   [[nodiscard]] double elapsedMs() const;
 
+  /// Generation throughput (tok/s) from decode-step timing, 0 if none. Batch
+  /// analogue of single-prompt `TPS`.
+  [[nodiscard]] double decodeTokensPerSecond() const;
+  /// Prompt-processing throughput (tok/s) from pure-prefill-step timing, 0 if
+  /// none. Batch analogue of `ppTPS`.
+  [[nodiscard]] double prefillTokensPerSecond() const;
+
 private:
   uint64_t decodeStepCount_ = 0;
   uint64_t concurrentSeqSum_ = 0;
+  double decodeTimeMs_ = 0.0;
+  double prefillTimeMs_ = 0.0;
+  uint64_t decodeTokenCount_ = 0;
+  uint64_t prefillTokenCount_ = 0;
   std::chrono::steady_clock::time_point start_ =
       std::chrono::steady_clock::now();
 };
@@ -98,7 +117,8 @@ struct BatchResult {
 class ContinuousBatchScheduler {
 public:
   /// @param shared             Live llama handles. Must outlive `*this`.
-  /// @param maxChunkSize       Tokens fed per slot per step (typically n_batch).
+  /// @param maxChunkSize       Tokens fed per slot per step (typically
+  /// n_batch).
   /// @param ctxTotalTokens     Whole-pool KV-cache size (== llama_n_ctx).
   ///                            Partitioned uniformly across `batchSize`
   ///                            slots; per-seq ceiling is
@@ -115,11 +135,9 @@ public:
       std::optional<ToolsCompactProfile> toolsCompactProfile);
 
   ContinuousBatchScheduler(const ContinuousBatchScheduler&) = delete;
-  ContinuousBatchScheduler&
-  operator=(const ContinuousBatchScheduler&) = delete;
+  ContinuousBatchScheduler& operator=(const ContinuousBatchScheduler&) = delete;
   ContinuousBatchScheduler(ContinuousBatchScheduler&&) = delete;
-  ContinuousBatchScheduler&
-  operator=(ContinuousBatchScheduler&&) = delete;
+  ContinuousBatchScheduler& operator=(ContinuousBatchScheduler&&) = delete;
 
   ~ContinuousBatchScheduler();
 
@@ -152,10 +170,8 @@ public:
   /// driving loop.
   [[nodiscard]] bool step();
 
-  /// True while at least one slot has tokens to feed or sample.
   [[nodiscard]] bool hasWork() const;
 
-  /// Number of currently occupied slots.
   [[nodiscard]] unsigned numActive() const;
 
   void resetRuntimeStats();
@@ -212,6 +228,10 @@ private:
   void clearLocked();
   void notifyDone(uint32_t seqId);
   void freeSlot(uint32_t seqId);
+  void finalizeFinishedSequences();
+  std::function<void(const std::string&)> getOutputCallback(
+      SlotState& slot, uint32_t seqId);
+  std::function<bool(const Request&)> hasValidDriverF() const;
   void saveCacheForSlot(uint32_t seqId, const SlotState& slot);
   void accumulateSlotRuntimeStats(const SlotState& slot, const Request& req);
 
